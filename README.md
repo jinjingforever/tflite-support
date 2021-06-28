@@ -37,3 +37,9 @@ using bazel and emsdk.
      sure Chrome has these two features
      [turned on](https://drive.google.com/file/d/13hqGwBOTJFoqMQVUAn_tiYp-uqQN_NUq/view?usp=sharing)
      from `chrome://flags`.
+   - Run `yarn run electron` to start the demo in electron.js. As electron.js has issues to support WebWorker, add the single thread build target `tflite_model_runner_cc_st` and use it when running in electron.js.
+5. The WebNN delegate support
+   - `tensorflow_lite_webnn_delegate.patch`: the WebNN delegate implementation.
+   - `emscripten_webnn_support.patch`: WebNN support of emscripten.
+   - `emsdk.patch`: workaround the frozen cache setting of emscripten so WebNN support can be regenerated. As the cache is cleared, the first `yarn build` would fail. Please rerun, it would succeed.
+   - Add `TFLiteWebModelRunnerOptions.enableWebNNDelegate` to enable or disable WebNN delegate.
