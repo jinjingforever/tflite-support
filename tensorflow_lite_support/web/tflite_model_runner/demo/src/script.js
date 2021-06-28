@@ -21,7 +21,7 @@ async function start() {
           offset, modelBytes.length, {
             numThreads: Math.min(
                 4, Math.max(1, (navigator.hardwareConcurrency || 1) / 2)),
-            enableWebNNDelegate: false
+            enableWebNNDelegate: document.getElementById('webnnDelegate').checked
           });
   if (!modelRunnerResult.ok()) {
     throw new Error(
@@ -33,8 +33,6 @@ async function start() {
       `Loaded WASM module and TFLite model ${MODEL_PATH} in ${
           loadFinishedMs}ms`;
   document.querySelector('.content').classList.remove('hide');
-
-
 
   //////////////////////////////////////////////////////////////////////////////
   // Get input and output info.
@@ -73,10 +71,28 @@ async function start() {
   //////////////////////////////////////////////////////////////////////////////
   // Infer, get output tensor, and sort by logit values in reverse.
 
-  const inferStart = Date.now();
-  const success = modelRunner.Infer();
-  const inferLatency = Date.now() - inferStart;
-  if (!success) return;
+  // Set 'numRuns' param to run inference multiple times
+  // numRuns includes the first run of inference
+  
+  let numRuns = document.getElementById('numRuns').value;
+  console.log('numRuns: ', numRuns);
+
+  if (numRuns < 1) {
+    alert('Run Number should be greater than 0!');
+    return;
+  }
+  numRuns = numRuns === null ? 1 : parseInt(numRuns);
+
+  const inferTimes = [];
+  for (let i = 0; i < numRuns; i++) {
+    const start = performance.now();
+    const success = modelRunner.Infer();
+    const inferTime = (performance.now() - start).toFixed(2);
+    if (!success) return;
+    console.log(`Infer time ${i+1}: ${inferTime} ms`);
+    inferTimes.push(Number(inferTime));
+  }
+
   const result = Array.from(output.data());
   result.shift();  // Remove the first logit which is the background noise.
   const sortedResult = result
@@ -90,9 +106,37 @@ async function start() {
 
   const classIndex = sortedResult[0].i;
   const score = sortedResult[0].logit;
-  document.querySelector('.result').textContent =
-      `${IMAGENET_CLASSES[classIndex]} (score: ${score.toFixed(3)}, latency: ${
-          inferLatency}ms)`;
+  if (inferTimes.length > 1) {
+    const averageTime = (inferTimes.reduce((acc, curr) => acc + curr, 0) / inferTimes.length).toFixed(2);
+    const minTime = Math.min(...inferTimes);
+    const maxTime = Math.max(...inferTimes);
+    const medianTime = getMedianValue(inferTimes);
+    document.querySelector('.result').innerHTML =
+    `${IMAGENET_CLASSES[classIndex]} (score: ${score.toFixed(3)}) <br>
+      numRuns: ${numRuns} <br> average time: ${averageTime} ms <br>
+      median time: ${medianTime} ms <br> max Time: ${maxTime} ms <br>
+      min Time: ${minTime} ms`;
+  } else {
+    document.querySelector('.result').textContent =
+    `${IMAGENET_CLASSES[classIndex]} (score: ${score.toFixed(3)}, latency: ${
+      inferTimes[0]}ms)`;
+  }
+}
+
+if (!isNode()) {
+  loadScript('./tflite_model_runner_cc.js');
+} else {
+  loadScript('./tflite_model_runner_cc_st.js');
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Helper functions.
+
+function getMedianValue(array) {
+  array = array.sort((a, b) => a - b);
+  const medianValue = array.length % 2 !== 0 ? array[Math.floor(array.length / 2)] :
+      (array[array.length / 2 - 1] + array[array.length / 2]) / 2;
+  return medianValue.toFixed(2);
 }
 
 function isNode() {
@@ -101,25 +145,16 @@ function isNode() {
       (typeof process.versions.node !== 'undefined');
 }
 
-function loadScript(url, callback) {
+function loadScript(url) {
   var script = document.createElement('script');
   script.type = 'text/javascript';
   script.onload = function() {
-    callback();
+    document.getElementById('predict').disabled = false;
   };
 
   script.src = url;
   document.getElementsByTagName('head')[0].appendChild(script);
 }
-
-if (!isNode()) {
-  loadScript('./tflite_model_runner_cc.js', start);
-} else {
-  loadScript('./tflite_model_runner_cc_st.js', start);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Helper functions.
 
 let fromPixels2DContext;
 

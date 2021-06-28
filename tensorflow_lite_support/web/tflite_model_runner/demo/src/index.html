@@ -37,8 +37,18 @@
 
   <!-- Loading status -->
   <div class="loading-stats">Loading...</div>
-
-  <div class="content hide">
+  <div class="content">
+    <div>
+      Run Number: <input type="number" id="numRuns" value="1" min="1" defaultValue="1"/>
+    </div>
+    <div>
+      use WebNN delegate: <input type="checkbox" id="webnnDelegate" />
+    </div>
+    <div>
+      <input type="button" onclick="start()" value="Predict" id="predict" disabled />
+    </div>
+  </div>
+  <div class="content">
     <img src="wine.jpeg" alt="wine"/>
     <div class="result"></div>
   </div>
