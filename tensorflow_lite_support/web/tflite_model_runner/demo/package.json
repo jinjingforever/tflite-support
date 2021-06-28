@@ -3,13 +3,12 @@
     "clang-format": "~1.2.4"
   },
   "dependencies": {
-    "electron": "^13.1.4",
-    "webnn-node": "file:../../../../../webnn-native/node"
+    "electron": "^13.1.4"
   },
   "main": "main.js",
   "scripts": {
     "build": "./build.sh",
     "start": "./start.sh",
-    "electron": "electron ."
+    "electron": "./electron.sh"
   }
 }
