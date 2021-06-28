@@ -35,6 +35,8 @@ struct TFLiteWebModelRunnerOptions {
   // -1 means to let interpreter set the threads count available to itself.
   int num_threads = kDefaultNumThreads;
 
+  bool enable_webnn_delegate = false;
+
   // TODO(jingjin): Add more as needed.
 };
 

@@ -20,7 +20,8 @@ async function start() {
       module.TFLiteWebModelRunner.CreateFromBufferAndOptions(
           offset, modelBytes.length, {
             numThreads: Math.min(
-                4, Math.max(1, (navigator.hardwareConcurrency || 1) / 2))
+                4, Math.max(1, (navigator.hardwareConcurrency || 1) / 2)),
+            enableWebNNDelegate: false
           });
   if (!modelRunnerResult.ok()) {
     throw new Error(
@@ -94,8 +95,28 @@ async function start() {
           inferLatency}ms)`;
 }
 
-start();
+function isNode() {
+  return (typeof process !== 'undefined') &&
+      (typeof process.versions !== 'undefined') &&
+      (typeof process.versions.node !== 'undefined');
+}
 
+function loadScript(url, callback) {
+  var script = document.createElement('script');
+  script.type = 'text/javascript';
+  script.onload = function() {
+    callback();
+  };
+
+  script.src = url;
+  document.getElementsByTagName('head')[0].appendChild(script);
+}
+
+if (!isNode()) {
+  loadScript('./tflite_model_runner_cc.js', start);
+} else {
+  loadScript('./tflite_model_runner_cc_st.js', start);
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Helper functions.

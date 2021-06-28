@@ -24,6 +24,8 @@ limitations under the License.
 #include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow_lite_support/cc/port/statusor.h"
+#include "tensorflow/lite/interpreter.h"
+#include "tensorflow/lite/delegates/webnn/webnn_delegate.h"
 
 using tflite::support::StatusOr;
 
@@ -94,6 +96,18 @@ TfLiteStatus TFLiteWebModelRunner::InitFromBuffer(
   }
   if (!model_->initialized()) {
     return kTfLiteError;
+  }
+
+  if (options_.enable_webnn_delegate) {
+    TfLiteWebNNDelegateOptions options =
+        TfLiteWebNNDelegateOptionsDefault();
+    auto webnn_delegate = TfLiteWebNNDelegateCreate(&options);
+    auto delegate_ptr = tflite::Interpreter::TfLiteDelegatePtr(webnn_delegate, [](TfLiteDelegate* delegate) {
+      TfLiteWebNNDelegateDelete(delegate);
+    });
+    if (interpreter_->ModifyGraphWithDelegate(std::move(delegate_ptr)) != kTfLiteOk) {
+        printf("Failed to apply webnn delegate.\n");
+    }
   }
 
   // Allocate memory for the tensors in the model.
