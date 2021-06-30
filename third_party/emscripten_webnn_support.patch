@@ -383,7 +383,7 @@ index 000000000..b95d5436c
 +    var builder = WebNN.mgrGraphBuilder.get(builderId);
 +    var desc = WebNN.makeOperandDescriptor(descPtr);
 +    var buffer = WebNN.makeArrayBufferView(valuePtr, size);
-+    var constant = builder.constant(desc, buffer);
++    var constant = typeof desc.dimensions === 'undefined' ? builder.constant(buffer[0]) : builder.constant(desc, buffer);
 +    return WebNN.mgrOperand.create(constant);
 +  },
 +
