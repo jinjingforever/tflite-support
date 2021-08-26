@@ -22,7 +22,7 @@ index 70468790e81..9be5a01e589 100644
  # WARNING: This build flag is experimental and subject to change.
  config_setting(
 diff --git a/tensorflow/lite/CMakeLists.txt b/tensorflow/lite/CMakeLists.txt
-index f778a464f32..6a527362ca7 100644
+index f778a464f32..ce54720e2ee 100644
 --- a/tensorflow/lite/CMakeLists.txt
 +++ b/tensorflow/lite/CMakeLists.txt
 @@ -67,6 +67,7 @@ cmake_dependent_option(TFLITE_ENABLE_NNAPI_VERBOSE_VALIDATION "Enable NNAPI verb
@@ -39,8 +39,8 @@ index f778a464f32..6a527362ca7 100644
  endif()
 +if(TFLITE_ENABLE_WEBNN)
 +  include_directories(
-+    "~/code/webnn-native/out/openvino/gen/src/include"
-+    "~/code/webnn-native/src/include"
++    "$ENV{WEBNN_NATIVE_DIR}/gen/src/include"
++    "$ENV{WEBNN_NATIVE_DIR}/../../src/include"
 +  )
 +  populate_tflite_source_vars("delegates/webnn"
 +    TFLITE_DELEGATES_WEBNN_SRCS
@@ -114,10 +114,10 @@ index 00000000000..1b25e9e87fa
 \ No newline at end of file
 diff --git a/tensorflow/lite/delegates/webnn/webnn_delegate.cc b/tensorflow/lite/delegates/webnn/webnn_delegate.cc
 new file mode 100644
-index 00000000000..1e89c9188b3
+index 00000000000..2bc6db04707
 --- /dev/null
 +++ b/tensorflow/lite/delegates/webnn/webnn_delegate.cc
-@@ -0,0 +1,1527 @@
+@@ -0,0 +1,1828 @@
 +/* Copyright 2021 The TensorFlow Authors. All Rights Reserved.
 +
 +Licensed under the Apache License, Version 2.0 (the "License");
@@ -176,9 +176,17 @@ index 00000000000..1e89c9188b3
 +
 + public:
 +  explicit Delegate(const TfLiteWebNNDelegateOptions* options) {
-+    // TODO(nhu): support MLDevicePreference and MLPowerPreference
++    context_options_.devicePreference = static_cast<MLDevicePreference>(options->devicePreference);
++    context_options_.powerPreference = static_cast<MLPowerPreference>(options->powerPreference);
++    std::unordered_map<uint32_t, std::string> device_preference_names = {
++        {0, "Default"}, {1, "GPU"}, {2, "CPU"}};
++    std::unordered_map<uint32_t, std::string> power_preference_names = {
++        {0, "Default"}, {1, "High-performance"}, {2, "Low-power"}};
 +    TFLITE_LOG_PROD_ONCE(tflite::TFLITE_LOG_INFO,
-+                         "Created TensorFlow Lite WebNN delegate.");
++                         "Created TensorFlow Lite WebNN delegate for device"
++                         " %s and power %s.",
++                         device_preference_names[context_options_.devicePreference].c_str(),
++                         power_preference_names[context_options_.powerPreference].c_str());
 +  }
 +
 +  TfLiteIntArray* PrepareOpsToDelegate(TfLiteContext* context);
@@ -207,6 +215,8 @@ index 00000000000..1e89c9188b3
 +  std::unordered_set<int> static_unpack_nodes_;
 +  // Set of indices of tensors with unpacked static sparse weights.
 +  std::unordered_set<int> static_sparse_weights_;
++
++  MLContextOptions context_options_;
 +};
 +
 +class Subgraph {
@@ -235,11 +245,11 @@ index 00000000000..1e89c9188b3
 +
 +    // Create WebNN context and graph builder
 +#ifdef __EMSCRIPTEN__
-+    ml::Context ml_context = emscripten_webnn_create_context();
++    ml::Context ml_context = emscripten_webnn_create_context(&(delegate->context_options_));
 +#else
 +    WebnnProcTable backend_procs = webnn_native::GetProcs();
 +    webnnProcSetProcs(&backend_procs);
-+    ml::Context ml_context = ml::Context(webnn_native::CreateContext());
++    ml::Context ml_context = ml::Context(webnn_native::CreateContext(&(delegate->context_options_)));
 +#endif
 +    if (!ml_context) {
 +      TF_LITE_KERNEL_LOG(context, "Failed to create WebNN context.");
@@ -283,7 +293,10 @@ index 00000000000..1e89c9188b3
 +      }
 +
 +      switch (registration->builtin_code) {
++        case kTfLiteBuiltinMean:
++        case kTfLiteBuiltinPad:
 +        case kTfLiteBuiltinReshape:
++        case kTfLiteBuiltinResizeBilinear:
 +          // Ignore the second input (new shape),
 +          // because it is represented as parameters of the WebNN operator
 +          // rather than extra input.
@@ -358,7 +371,10 @@ index 00000000000..1e89c9188b3
 +          std::string name = std::to_string(t);
 +          operand = ml_builder.Input(name.c_str(), &desc);
 +        } else {
-+          operand = ml_builder.Constant(&desc, data, context->tensors[t].bytes);
++          ml::ArrayBufferView buffer = {const_cast<void*>(data), context->tensors[t].bytes};
++          // buffer.buffer = data;
++          // buffer.byteLength = context->tensors[t].bytes;
++          operand = ml_builder.Constant(&desc, &buffer);
 +        }
 +        webnn_operands[t] = operand;
 +      }
@@ -401,7 +417,7 @@ index 00000000000..1e89c9188b3
 +      named_operands.Set(name.c_str(), webnn_operands[o]);
 +    }
 +
-+    ml::Graph ml_graph = ml_builder.BuildSync(named_operands);
++    ml::Graph ml_graph = ml_builder.Build(named_operands);
 +    if (!ml_graph) {
 +      TF_LITE_KERNEL_LOG(context, "failed to build WebNN graph");
 +      return nullptr;
@@ -415,8 +431,8 @@ index 00000000000..1e89c9188b3
 +  TfLiteStatus Invoke(TfLiteContext* context) {
 +    ml::NamedInputs named_inputs = ml::CreateNamedInputs();
 +    for (int t : inputs_) {
-+      ml_inputs_[t].buffer = context->tensors[t].data.raw;
-+      ml_inputs_[t].size = context->tensors[t].bytes;
++      ml_inputs_[t].resource.buffer = context->tensors[t].data.raw;
++      ml_inputs_[t].resource.byteLength = context->tensors[t].bytes;
 +      std::string name = std::to_string(t);
 +      named_inputs.Set(name.c_str(), &ml_inputs_[t]);
 +    }
@@ -424,12 +440,12 @@ index 00000000000..1e89c9188b3
 +    ml::NamedOutputs named_outputs = ml::CreateNamedOutputs();
 +    for (int t : outputs_) {
 +      ml_outputs_[t].buffer = context->tensors[t].data.raw;
-+      ml_outputs_[t].size = context->tensors[t].bytes;
++      ml_outputs_[t].byteLength = context->tensors[t].bytes;
 +      std::string name = std::to_string(t);
 +      named_outputs.Set(name.c_str(), &ml_outputs_[t]);
 +    }
 +
-+    ml::ComputeGraphStatus status = ml_graph_.ComputeSync(named_inputs, named_outputs);
++    ml::ComputeGraphStatus status = ml_graph_.Compute(named_inputs, named_outputs);
 +    if (status != ml::ComputeGraphStatus::Success) {
 +      TF_LITE_KERNEL_LOG(context, "failed to compute WebNN graph");
 +      return kTfLiteError;
@@ -767,8 +783,10 @@ index 00000000000..1e89c9188b3
 +    std::vector<int32_t> dims = {};
 +    ml::OperandDescriptor desc = {
 +        ml::OperandType::Float32, dims.data(), static_cast<uint32_t>(dims.size())};
-+    ml::Operand min_operand = builder.Constant(&desc, min_buffer.get(), sizeof(float));
-+    ml::Operand max_operand = builder.Constant(&desc, max_buffer.get(), sizeof(float));
++    ml::ArrayBufferView min_buffer_view = {min_buffer.get(), sizeof(float)};
++    ml::Operand min_operand = builder.Constant(&desc, &min_buffer_view);
++    ml::ArrayBufferView max_buffer_view = {max_buffer.get(), sizeof(float)};
++    ml::Operand max_operand = builder.Constant(&desc, &max_buffer_view);
 +    ml::ClampOptions options;
 +    options.minValue = min_operand;
 +    options.maxValue = max_operand;
@@ -844,12 +862,35 @@ index 00000000000..1e89c9188b3
 +        return VisitAddNode(builder, logging_context, node_index, node,
 +                            context->tensors, add_params, webnn_operands, constant_buffers);
 +      }
++      case kTfLiteBuiltinMul: {
++        const TfLiteMulParams* mul_params =
++            static_cast<const TfLiteMulParams*>(node->builtin_data);
++
++        return VisitMulNode(builder, logging_context, node_index, node,
++                            context->tensors, mul_params, webnn_operands, constant_buffers);
++      }
 +      case kTfLiteBuiltinAveragePool2d: {
 +        const TfLitePoolParams* pool_params =
 +            static_cast<const TfLitePoolParams*>(node->builtin_data);
 +
 +        return VisitAveragePool2DNode(builder, logging_context, node_index,
 +                                      node, context->tensors, pool_params,
++                                      webnn_operands, constant_buffers);
++      }
++      case kTfLiteBuiltinMaxPool2d: {
++        const TfLitePoolParams* pool_params =
++            static_cast<const TfLitePoolParams*>(node->builtin_data);
++
++        return VisitMaxPool2DNode(builder, logging_context, node_index,
++                                  node, context->tensors, pool_params,
++                                  webnn_operands, constant_buffers);
++      }
++      case kTfLiteBuiltinConcatenation: {
++        const TfLiteConcatenationParams* concat_params =
++            static_cast<const TfLiteConcatenationParams*>(node->builtin_data);
++
++        return VisitConcatenationNode(builder, logging_context, node_index, node,
++                                      context->tensors, concat_params,
 +                                      webnn_operands, constant_buffers);
 +      }
 +      case kTfLiteBuiltinConv2d: {
@@ -874,6 +915,21 @@ index 00000000000..1e89c9188b3
 +
 +        return VisitReshapeNode(builder, logging_context, node_index, node,
 +                                context->tensors, reshape_params, webnn_operands);
++      }
++      case kTfLiteBuiltinResizeBilinear: {
++        const TfLiteResizeBilinearParams* resize_params =
++            static_cast<const TfLiteResizeBilinearParams*>(node->builtin_data);
++
++        return VisitResizeBilinearNode(builder, logging_context, node_index,
++                                       node, context->tensors, resize_params,
++                                       webnn_operands);
++      }
++      case kTfLiteBuiltinSoftmax: {
++        const TfLiteSoftmaxParams* softmax_params =
++            static_cast<const TfLiteSoftmaxParams*>(node->builtin_data);
++
++        return VisitSoftmaxNode(builder, logging_context, node_index, node,
++                                context->tensors, softmax_params, webnn_operands);
 +      }
 +      default:
 +        return kTfLiteError;
@@ -919,6 +975,50 @@ index 00000000000..1e89c9188b3
 +      TF_LITE_ENSURE_STATUS(VisitActivation(
 +          builder, logging_context, node_index, output_tensor_id, output_tensor_id,
 +          add_params->activation, webnn_operands, constant_buffers));
++    }
++
++    return kTfLiteOk;
++  }
++
++  static TfLiteStatus VisitMulNode(
++      const ml::GraphBuilder& builder, TfLiteContext* logging_context, int node_index,
++      TfLiteNode* node, const TfLiteTensor* tensors,
++      const TfLiteMulParams* mul_params,
++      std::vector<ml::Operand>& webnn_operands,
++      std::vector<std::unique_ptr<char>>& constant_buffers) {
++    TF_LITE_ENSURE_STATUS(
++        CheckNumInputsAndOutputs(logging_context, node, 2, 1, node_index));
++
++    const int input1_tensor_id = node->inputs->data[0];
++    const TfLiteTensor& input1_tensor = tensors[input1_tensor_id];
++    TF_LITE_ENSURE_STATUS(CheckTensorFloat32OrQInt8Type(
++        logging_context, input1_tensor, input1_tensor_id, node_index));
++    TF_LITE_ENSURE_STATUS(CheckTensorNonDynamicAllocation(
++        logging_context, input1_tensor, input1_tensor_id, node_index));
++
++    const int input2_tensor_id = node->inputs->data[1];
++    const TfLiteTensor& input2_tensor = tensors[input2_tensor_id];
++    TF_LITE_ENSURE_STATUS(CheckTensorFloat32OrQInt8Type(
++        logging_context, input2_tensor, input2_tensor_id, node_index));
++    TF_LITE_ENSURE_STATUS(CheckTensorNonDynamicAllocation(
++        logging_context, input2_tensor, input2_tensor_id, node_index));
++
++    const int output_tensor_id = node->outputs->data[0];
++    const TfLiteTensor& output_tensor = tensors[output_tensor_id];
++    TF_LITE_ENSURE_STATUS(CheckTensorFloat32OrQInt8Type(
++        logging_context, output_tensor, output_tensor_id, node_index));
++    TF_LITE_ENSURE_STATUS(CheckTensorNonDynamicAllocation(
++        logging_context, output_tensor, output_tensor_id, node_index));
++
++    if (builder) {
++      webnn_operands[output_tensor_id] =
++          builder.Mul(webnn_operands[input1_tensor_id], webnn_operands[input2_tensor_id]);
++    }
++
++    if (mul_params != nullptr) {
++      TF_LITE_ENSURE_STATUS(VisitActivation(
++          builder, logging_context, node_index, output_tensor_id, output_tensor_id,
++          mul_params->activation, webnn_operands, constant_buffers));
 +    }
 +
 +    return kTfLiteOk;
@@ -980,6 +1080,87 @@ index 00000000000..1e89c9188b3
 +          builder, logging_context, node_index, output_tensor_id, output_tensor_id,
 +          pool_params->activation, webnn_operands, constant_buffers));
 +
++    return kTfLiteOk;
++  }
++
++  static TfLiteStatus VisitMaxPool2DNode(
++      const ml::GraphBuilder& builder, TfLiteContext* logging_context, int node_index,
++      TfLiteNode* node, const TfLiteTensor* tensors,
++      const TfLitePoolParams* pool_params,
++      std::vector<ml::Operand>& webnn_operands,
++      std::vector<std::unique_ptr<char>>& constant_buffers) {
++    TF_LITE_ENSURE_STATUS(
++        CheckNumInputsAndOutputs(logging_context, node, 1, 1, node_index));
++
++    const int input_tensor_id = node->inputs->data[0];
++    const TfLiteTensor& input_tensor = tensors[input_tensor_id];
++    TF_LITE_ENSURE_STATUS(CheckTensorFloat32Type(
++        logging_context, input_tensor, input_tensor_id, node_index));
++    TF_LITE_ENSURE_STATUS(CheckTensorNonDynamicAllocation(
++        logging_context, input_tensor, input_tensor_id, node_index));
++
++    const int output_tensor_id = node->outputs->data[0];
++    const TfLiteTensor& output_tensor = tensors[output_tensor_id];
++    TF_LITE_ENSURE_STATUS(CheckTensorFloat32Type(
++        logging_context, output_tensor, output_tensor_id, node_index));
++    TF_LITE_ENSURE_STATUS(CheckTensorNonDynamicAllocation(
++        logging_context, output_tensor, output_tensor_id, node_index));
++
++    TF_LITE_ENSURE_STATUS(
++        CheckPoolingParams(logging_context, pool_params, node_index));
++
++    ml::AutoPad auto_pad;
++    TF_LITE_ENSURE_STATUS(CalculatePadding(
++        logging_context, pool_params->padding, auto_pad, node_index));
++
++    if (builder) {
++      ml::Operand output;
++      if (pool_params->filter_height == 1 && pool_params->filter_width == 1) {
++        // Only do activation.
++        output = webnn_operands[input_tensor_id];
++      } else {
++        ml::Pool2dOptions options;
++        options.autoPad = auto_pad;
++        std::vector<int32_t> strides = {
++            pool_params->stride_height, pool_params->stride_width};
++        options.strides = strides.data();
++        options.stridesCount = strides.size();
++        std::vector<int32_t> windowDimensions = {
++            pool_params->filter_height, pool_params->filter_width};
++        options.windowDimensions = windowDimensions.data();
++        options.windowDimensionsCount = windowDimensions.size();
++        options.layout = ml::InputOperandLayout::Nhwc;
++        output = builder.MaxPool2d(webnn_operands[input_tensor_id], &options);
++      }
++      webnn_operands[output_tensor_id] = output;
++    }
++
++    TF_LITE_ENSURE_STATUS(VisitActivation(
++          builder, logging_context, node_index, output_tensor_id, output_tensor_id,
++          pool_params->activation, webnn_operands, constant_buffers));
++
++    return kTfLiteOk;
++  }
++
++  static TfLiteStatus VisitConcatenationNode(
++      const ml::GraphBuilder& builder, TfLiteContext* logging_context, int node_index,
++      TfLiteNode* node, const TfLiteTensor* tensors,
++      const TfLiteConcatenationParams* concat_params,
++      std::vector<ml::Operand>& webnn_operands,
++      std::vector<std::unique_ptr<char>>& constant_buffers) {
++    size_t input_size = node->inputs->size;
++    const TfLiteTensor& first_input_tensor = tensors[node->inputs->data[0]];
++    uint32_t axis = concat_params->axis < 0
++                     ? first_input_tensor.dims->size + concat_params->axis
++                     : concat_params->axis;
++    if (builder) {
++      std::vector<ml::Operand> input_operands;
++      for (size_t i = 0; i < input_size; ++i) {
++        input_operands.push_back(webnn_operands[node->inputs->data[i]]);
++      }
++      ml::Operand output_operand = builder.Concat(input_operands.size(), input_operands.data(), axis);
++      webnn_operands[node->outputs->data[0]] = output_operand;
++    }
 +    return kTfLiteOk;
 +  }
 +
@@ -1224,6 +1405,126 @@ index 00000000000..1e89c9188b3
 +    return kTfLiteOk;
 +  }
 +
++  static TfLiteStatus VisitResizeBilinearNode(
++      const ml::GraphBuilder& builder, TfLiteContext* logging_context, int node_index,
++      TfLiteNode* node, const TfLiteTensor* tensors,
++      const TfLiteResizeBilinearParams* resize_params,
++      std::vector<ml::Operand>& webnn_operands) {
++    TF_LITE_ENSURE_STATUS(
++        CheckNumInputsAndOutputs(logging_context, node, 2, 1, node_index));
++
++    const int input_tensor_id = node->inputs->data[0];
++    const TfLiteTensor& input_tensor = tensors[input_tensor_id];
++    TF_LITE_ENSURE_STATUS(CheckTensorFloat32Type(
++        logging_context, input_tensor, input_tensor_id, node_index));
++    TF_LITE_ENSURE_STATUS(CheckTensorShape(logging_context, input_tensor, 4,
++                                           input_tensor_id));
++    TF_LITE_ENSURE_STATUS(CheckTensorNonDynamicAllocation(
++        logging_context, input_tensor, input_tensor_id, node_index));
++
++    const int shape_tensor_id = node->inputs->data[1];
++    const TfLiteTensor& shape_tensor = tensors[shape_tensor_id];
++    TF_LITE_ENSURE_STATUS(CheckTensorType(logging_context, shape_tensor,
++                                          kTfLiteInt32, shape_tensor_id,
++                                          node_index));
++    TF_LITE_ENSURE_STATUS(CheckShapeTensorShape(
++        logging_context, shape_tensor, shape_tensor_id, node_index));
++    if (shape_tensor.dims->data[0] != 2) {
++      TF_LITE_MAYBE_KERNEL_LOG(
++          logging_context,
++          "unexpected number of dimensions %d in the output shape in node %d",
++          shape_tensor.dims->data[0], node_index);
++    }
++    TF_LITE_ENSURE_STATUS(CheckTensorStaticAllocation(
++        logging_context, shape_tensor, shape_tensor_id, node_index));
++
++    const int output_tensor_id = node->outputs->data[0];
++    const TfLiteTensor& output_tensor = tensors[output_tensor_id];
++    TF_LITE_ENSURE_STATUS(CheckTensorFloat32Type(
++        logging_context, output_tensor, output_tensor_id, node_index));
++    TF_LITE_ENSURE_STATUS(CheckTensorShape(logging_context, output_tensor, 4,
++                                           output_tensor_id));
++    TF_LITE_ENSURE_STATUS(CheckTensorNonDynamicAllocation(
++        logging_context, output_tensor, output_tensor_id, node_index));
++
++    const int32_t* shape_data =
++        reinterpret_cast<const int32_t*>(shape_tensor.data.data);
++    for (int i = 0; i < shape_tensor.dims->data[0]; i++) {
++      const int32_t dim = shape_data[i];
++      if (dim <= 0) {
++        TF_LITE_MAYBE_KERNEL_LOG(
++            logging_context, "invalid output dimension #%d value %d in node %d",
++            i, dim, node_index);
++        return kTfLiteError;
++      }
++    }
++
++    if (builder) {
++      // Transpose NHWC to NCHW
++      std::vector<int32_t> nhwc_to_nchw = {0, 3, 1, 2};
++      ml::TransposeOptions transpose_options;
++      transpose_options.permutation = nhwc_to_nchw.data();
++      transpose_options.permutationCount = nhwc_to_nchw.size();
++      ml::Operand input_operand = builder.Transpose(webnn_operands[input_tensor_id], &transpose_options);
++      std::vector<int32_t> new_sizes = {
++        input_tensor.dims->data[0],
++        input_tensor.dims->data[3],
++        shape_data[0],
++        shape_data[1]
++      };
++      ml::ResampleOptions options;
++      options.mode = ml::InterpolationMode::Linear;
++      options.sizes = new_sizes.data();
++      options.sizesCount = new_sizes.size();
++      ml::Operand output = builder.Resample(input_operand, &options);
++      // Transpose NCHW to NHWC
++      std::vector<int32_t> nchw_to_nhwc = {0, 2, 3, 1};
++      transpose_options.permutation = nchw_to_nhwc.data();
++      transpose_options.permutationCount = nchw_to_nhwc.size();
++      webnn_operands[output_tensor_id] = builder.Transpose(output, &transpose_options);
++    }
++
++    return kTfLiteOk;
++  }
++
++  static TfLiteStatus VisitSoftmaxNode(
++      const ml::GraphBuilder& builder, TfLiteContext* logging_context, int node_index,
++      TfLiteNode* node, const TfLiteTensor* tensors,
++      const TfLiteSoftmaxParams* params,
++      std::vector<ml::Operand>& webnn_operands) {
++    if (params->beta != 1.0f) {
++      if (logging_context != nullptr) {
++        TF_LITE_KERNEL_LOG(logging_context,
++                           "unsupported beta value %.7f in SOFTMAX node #%d",
++                           params->beta, node_index);
++      }
++      return kTfLiteError;
++    }
++
++    TF_LITE_ENSURE_STATUS(
++        CheckNumInputsAndOutputs(logging_context, node, 1, 1, node_index));
++
++    const int input_tensor_id = node->inputs->data[0];
++    const TfLiteTensor& input_tensor = tensors[input_tensor_id];
++    TF_LITE_ENSURE_STATUS(CheckTensorFloat32Type(
++        logging_context, input_tensor, input_tensor_id, node_index));
++    TF_LITE_ENSURE_STATUS(CheckTensorNonDynamicAllocation(
++        logging_context, input_tensor, input_tensor_id, node_index));
++
++    const int output_tensor_id = node->outputs->data[0];
++    const TfLiteTensor& output_tensor = tensors[output_tensor_id];
++    TF_LITE_ENSURE_STATUS(CheckTensorFloat32Type(
++        logging_context, output_tensor, output_tensor_id, node_index));
++    TF_LITE_ENSURE_STATUS(CheckTensorNonDynamicAllocation(
++        logging_context, output_tensor, output_tensor_id, node_index));
++
++    if (builder) {
++      webnn_operands[output_tensor_id] = builder.Softmax(webnn_operands[input_tensor_id]);
++    }
++
++    return kTfLiteOk;
++  }
++
 + private:
 +  Subgraph(ml::Graph graph, std::unordered_set<int>&& inputs, std::unordered_set<int>&& outputs)
 +      : ml_graph_(graph), inputs_(inputs), outputs_(outputs) {
@@ -1241,7 +1542,7 @@ index 00000000000..1e89c9188b3
 +  std::unordered_set<int> inputs_;
 +  std::unordered_set<int> outputs_;
 +  std::unordered_map<int, ml::Input> ml_inputs_;
-+  std::unordered_map<int, ml::Output> ml_outputs_;
++  std::unordered_map<int, ml::ArrayBufferView> ml_outputs_;
 +};
 +
 +TfLiteIntArray* Delegate::PrepareOpsToDelegate(TfLiteContext* context) {
@@ -1647,10 +1948,10 @@ index 00000000000..1e89c9188b3
 +}
 diff --git a/tensorflow/lite/delegates/webnn/webnn_delegate.h b/tensorflow/lite/delegates/webnn/webnn_delegate.h
 new file mode 100644
-index 00000000000..90b50ed76d4
+index 00000000000..5b791c7777a
 --- /dev/null
 +++ b/tensorflow/lite/delegates/webnn/webnn_delegate.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,56 @@
 +/* Copyright 2021 The TensorFlow Authors. All Rights Reserved.
 +
 +Licensed under the Apache License, Version 2.0 (the "License");
@@ -1676,7 +1977,17 @@ index 00000000000..90b50ed76d4
 +#endif  // __cplusplus
 +
 +typedef struct {
++  // enum class DevicePreference : uint32_t {
++  //     Default = 0x00000000,
++  //     Gpu = 0x00000001,
++  //     Cpu = 0x00000002,
++  // };
 +  uint32_t devicePreference;
++  // enum class PowerPreference : uint32_t {
++  //     Default = 0x00000000,
++  //     High_performance = 0x00000001,
++  //     Low_power = 0x00000002,
++  // };
 +  uint32_t powerPreference;
 +} TfLiteWebNNDelegateOptions;
 +
@@ -1698,7 +2009,7 @@ index 00000000000..90b50ed76d4
 +
 +#endif  // TENSORFLOW_LITE_DELEGATES_WEBNN_WEBNN_DELEGATE_H_
 diff --git a/tensorflow/lite/examples/label_image/CMakeLists.txt b/tensorflow/lite/examples/label_image/CMakeLists.txt
-index 188906e791f..5917dc5b0a4 100644
+index 188906e791f..014e9eff46c 100644
 --- a/tensorflow/lite/examples/label_image/CMakeLists.txt
 +++ b/tensorflow/lite/examples/label_image/CMakeLists.txt
 @@ -40,6 +40,18 @@ else()
@@ -1709,9 +2020,9 @@ index 188906e791f..5917dc5b0a4 100644
 +  list(APPEND TFLITE_LABEL_IMAGE_SRCS
 +    ${TFLITE_SOURCE_DIR}/tools/delegates/webnn_delegate_provider.cc
 +  )
-+  list(APPEND TFLITE_LABEL_IMAGE_SRCS "~/code/webnn-native/out/openvino/gen/src/webnn/webnn_cpp.cpp")
++  list(APPEND TFLITE_LABEL_IMAGE_SRCS "$ENV{WEBNN_NATIVE_DIR}/gen/src/webnn/webnn_cpp.cpp")
 +  link_directories(
-+    "~/code/webnn-native/out/openvino"
++    "$ENV{WEBNN_NATIVE_DIR}"
 +  )
 +else()
 +  set(TFLITE_LABEL_IMAGE_CC_OPTIONS "-DTFLITE_WITHOUT_WEBNN")
@@ -1728,10 +2039,10 @@ index 188906e791f..5917dc5b0a4 100644
 +  webnn_proc
  )
 diff --git a/tensorflow/lite/examples/label_image/label_image.cc b/tensorflow/lite/examples/label_image/label_image.cc
-index 15583426fe5..cc6160fdff1 100644
+index 15583426fe5..ab146fe1d13 100644
 --- a/tensorflow/lite/examples/label_image/label_image.cc
 +++ b/tensorflow/lite/examples/label_image/label_image.cc
-@@ -136,6 +136,16 @@ class DelegateProviders {
+@@ -136,6 +136,17 @@ class DelegateProviders {
          params_.Set<bool>("num_threads", s.number_of_threads);
        }
      }
@@ -1743,26 +2054,29 @@ index 15583426fe5..cc6160fdff1 100644
 +                     "WebNN delegate isn't supported on the platform!";
 +      } else {
 +        params_.Set<bool>("use_webnn", true);
++        params_.Set<int>("webnn_device", s.webnn_device);
 +      }
 +    }
    }
  
    // Create a list of TfLite delegates based on what have been initialized (i.e.
-@@ -422,7 +432,8 @@ void display_usage() {
+@@ -422,7 +433,9 @@ void display_usage() {
        << "--threads, -t: number of threads\n"
        << "--verbose, -v: [0|1] print more information\n"
        << "--warmup_runs, -w: number of warmup runs\n"
 -      << "--xnnpack_delegate, -x [0:1]: xnnpack delegate\n";
 +      << "--xnnpack_delegate, -x [0:1]: xnnpack delegate\n"
-+      << "--webnn_delegate, -n [0:1]: webnn delegate\n";
++      << "--webnn_delegate, -n [0|1]: webnn delegate (on|off)\n"
++      << "--webnn_device, -d [0|1|2]: webnn device (default|gpu|cpu) \n";
  }
  
  int Main(int argc, char** argv) {
-@@ -455,13 +466,14 @@ int Main(int argc, char** argv) {
+@@ -455,13 +468,15 @@ int Main(int argc, char** argv) {
          {"gl_backend", required_argument, nullptr, 'g'},
          {"hexagon_delegate", required_argument, nullptr, 'j'},
          {"xnnpack_delegate", required_argument, nullptr, 'x'},
 +        {"webnn_delegate", required_argument, nullptr, 'n'},
++        {"webnn_device", required_argument, nullptr, 'd'},
          {nullptr, 0, nullptr, 0}};
  
      /* getopt_long stores the option index here. */
@@ -1774,7 +2088,7 @@ index 15583426fe5..cc6160fdff1 100644
                      &option_index);
  
      /* Detect the end of the options. */
-@@ -529,6 +541,10 @@ int Main(int argc, char** argv) {
+@@ -529,6 +544,14 @@ int Main(int argc, char** argv) {
          s.xnnpack_delegate =
              strtol(optarg, nullptr, 10);  // NOLINT(runtime/deprecated_fn)
          break;
@@ -1782,18 +2096,23 @@ index 15583426fe5..cc6160fdff1 100644
 +        s.webnn_delegate =
 +            strtol(optarg, nullptr, 10);  // NOLINT(runtime/deprecated_fn)
 +        break;
++      case 'd':
++        s.webnn_device =
++            strtol(optarg, nullptr, 10);  // NOLINT(runtime/deprecated_fn)
++        break;
        case 'h':
        case '?':
          /* getopt_long already printed an error message. */
 diff --git a/tensorflow/lite/examples/label_image/label_image.h b/tensorflow/lite/examples/label_image/label_image.h
-index 1c00edb6558..3c2e522064d 100644
+index 1c00edb6558..e84ed493b62 100644
 --- a/tensorflow/lite/examples/label_image/label_image.h
 +++ b/tensorflow/lite/examples/label_image/label_image.h
-@@ -31,6 +31,7 @@ struct Settings {
+@@ -31,6 +31,8 @@ struct Settings {
    bool gl_backend = false;
    bool hexagon_delegate = false;
    bool xnnpack_delegate = false;
 +  bool webnn_delegate = false;
++  int webnn_device = 0;
    int loop_count = 1;
    float input_mean = 127.5f;
    float input_std = 127.5f;
@@ -1832,10 +2151,10 @@ index 00000000000..e22a8557e68
 +}  // namespace tflite
 diff --git a/tensorflow/lite/tools/delegates/webnn_delegate_provider.cc b/tensorflow/lite/tools/delegates/webnn_delegate_provider.cc
 new file mode 100644
-index 00000000000..8ee5d33fe4a
+index 00000000000..1e43bae302e
 --- /dev/null
 +++ b/tensorflow/lite/tools/delegates/webnn_delegate_provider.cc
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,63 @@
 +/* Copyright 2021 The TensorFlow Authors. All Rights Reserved.
 +
 +Licensed under the Apache License, Version 2.0 (the "License");
@@ -1862,6 +2181,7 @@ index 00000000000..8ee5d33fe4a
 + public:
 +  WebNNDelegateProvider() {
 +    default_params_.AddParam("use_webnn", ToolParam::Create<bool>(false));
++    default_params_.AddParam("webnn_device", ToolParam::Create<int>(0));
 +  }
 +
 +  std::vector<Flag> CreateFlags(ToolParams* params) const final;
@@ -1877,19 +2197,21 @@ index 00000000000..8ee5d33fe4a
 +std::vector<Flag> WebNNDelegateProvider::CreateFlags(
 +    ToolParams* params) const {
 +  std::vector<Flag> flags = {
-+      CreateFlag<bool>("use_webnn", params, "use WebNN")};
++      CreateFlag<bool>("use_webnn", params, "use WebNN"),
++      CreateFlag<int>("webnn_device", params, "WebNN device")};
 +  return flags;
 +}
 +
 +void WebNNDelegateProvider::LogParams(const ToolParams& params,
 +                                        bool verbose) const {
 +  LOG_TOOL_PARAM(params, bool, "use_webnn", "Use WebNN", verbose);
++  LOG_TOOL_PARAM(params, int, "webnn_device", "WebNN device", verbose);
 +}
 +
 +TfLiteDelegatePtr WebNNDelegateProvider::CreateTfLiteDelegate(
 +    const ToolParams& params) const {
 +  if (params.Get<bool>("use_webnn")) {
-+    return evaluation::CreateWebNNDelegate();
++    return evaluation::CreateWebNNDelegate(params.Get<int>("webnn_device"));
 +  }
 +  return TfLiteDelegatePtr(nullptr, [](TfLiteDelegate*) {});
 +}
@@ -1897,20 +2219,21 @@ index 00000000000..8ee5d33fe4a
 +}  // namespace tools
 +}  // namespace tflite
 diff --git a/tensorflow/lite/tools/evaluation/utils.cc b/tensorflow/lite/tools/evaluation/utils.cc
-index ec09394eb02..cc2ab2dd8b9 100644
+index ec09394eb02..bfd0f66c094 100644
 --- a/tensorflow/lite/tools/evaluation/utils.cc
 +++ b/tensorflow/lite/tools/evaluation/utils.cc
-@@ -194,5 +194,18 @@ TfLiteDelegatePtr CreateXNNPACKDelegate(int num_threads) {
+@@ -194,5 +194,19 @@ TfLiteDelegatePtr CreateXNNPACKDelegate(int num_threads) {
    return CreateXNNPACKDelegate(&opts);
  }
  #endif
 +
-+TfLiteDelegatePtr CreateWebNNDelegate() {
++TfLiteDelegatePtr CreateWebNNDelegate(int device) {
 +#if defined(TFLITE_WITHOUT_WEBNN)
 +  return CreateNullDelegate();
 +#else
 +  TfLiteWebNNDelegateOptions options =
 +      TfLiteWebNNDelegateOptionsDefault();
++  options.devicePreference = device;
 +  auto webnn_delegate = TfLiteWebNNDelegateCreate(&options);
 +  return TfLiteDelegatePtr(webnn_delegate, [](TfLiteDelegate* delegate) {
 +    TfLiteWebNNDelegateDelete(delegate);
@@ -1920,7 +2243,7 @@ index ec09394eb02..cc2ab2dd8b9 100644
  }  // namespace evaluation
  }  // namespace tflite
 diff --git a/tensorflow/lite/tools/evaluation/utils.h b/tensorflow/lite/tools/evaluation/utils.h
-index 4a25502b5e6..ac81a45d468 100644
+index 4a25502b5e6..f87720d946f 100644
 --- a/tensorflow/lite/tools/evaluation/utils.h
 +++ b/tensorflow/lite/tools/evaluation/utils.h
 @@ -39,6 +39,10 @@ limitations under the License.
@@ -1939,7 +2262,7 @@ index 4a25502b5e6..ac81a45d468 100644
  #endif
  TfLiteDelegatePtr CreateXNNPACKDelegate(int num_threads);
 +
-+TfLiteDelegatePtr CreateWebNNDelegate();
++TfLiteDelegatePtr CreateWebNNDelegate(int device);
 +
  }  // namespace evaluation
  }  // namespace tflite

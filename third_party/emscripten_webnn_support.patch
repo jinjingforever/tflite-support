@@ -12,24 +12,60 @@ index beaddc73b..6a107346f 100755
         shared.Settings.LEGACY_GL_EMULATION or \
 diff --git a/src/library_html5_webnn.js b/src/library_html5_webnn.js
 new file mode 100644
-index 000000000..adf80e0fe
+index 000000000..501bc0627
 --- /dev/null
 +++ b/src/library_html5_webnn.js
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,31 @@
 +mergeInto(LibraryManager.library, {
 +  emscripten_webnn_create_context__deps: ['$WebNN'],
 +  emscripten_webnn_create_context__postset: 'WebNN.initManagers();',
-+  emscripten_webnn_create_context: function() {
-+    var context = navigator.ml.createContext();
++  emscripten_webnn_create_context: function(optionsPtr) {
++    var options = {
++      "devicePreference": "default",
++      "powerPreference": "default"
++    };
++
++    var DevicePreference = [
++      'default',
++      'gpu',
++      'cpu',
++    ];
++    var PowerPreference = [
++      'default',
++      'high_performance',
++      'low_power',
++    ];
++    if (optionsPtr !== 0) {
++      options = {
++          "devicePreference": DevicePreference[
++            {{{ makeGetValue('optionsPtr', C_STRUCTS.MLContextOptions.devicePreference, 'i32', false, true) }}}],
++          "powerPreference": DevicePreference[
++            {{{ makeGetValue('optionsPtr', C_STRUCTS.MLContextOptions.powerPreference, 'i32', false, true) }}}]
++      };
++    }
++    var context = navigator.ml.createContext(options);
 +    return WebNN.mgrContext.create(context);
 +  },
 +});
+diff --git a/src/library_pthread.js b/src/library_pthread.js
+index 93b184c0f..8c16ca81a 100644
+--- a/src/library_pthread.js
++++ b/src/library_pthread.js
+@@ -398,7 +398,7 @@ var LibraryPThread = {
+       };
+ 
+ #if ENVIRONMENT_MAY_BE_NODE
+-      if (ENVIRONMENT_IS_NODE) {
++      if (ENVIRONMENT_IS_NODE && worker.on !== undefined) {
+         worker.on('message', function(data) {
+           worker.onmessage({ data: data });
+         });
 diff --git a/src/library_webnn.js b/src/library_webnn.js
 new file mode 100644
-index 000000000..b95d5436c
+index 000000000..d4fddca08
 --- /dev/null
 +++ b/src/library_webnn.js
-@@ -0,0 +1,541 @@
+@@ -0,0 +1,593 @@
 +/**
 + * @license
 + * Copyright 2021 The Emscripten Authors
@@ -147,11 +183,10 @@ index 000000000..b95d5436c
 +      {{{ webnn.makeInitManager('Graph') }}}
 +      {{{ webnn.makeInitManager('GraphBuilder') }}}
 +      {{{ webnn.makeInitManager('NamedInputs') }}}
-+      {{{ webnn.makeInitManager('NamedOperands') }}}
 +      {{{ webnn.makeInitManager('NamedOutputs') }}}
-+      {{{ webnn.makeInitManager('NamedResults') }}}
++      {{{ webnn.makeInitManager('NamedOperands') }}}
 +      {{{ webnn.makeInitManager('Operand') }}}
-+      {{{ webnn.makeInitManager('Result') }}}
++      {{{ webnn.makeInitManager('Operator') }}}
 +    },
 +
 +    AutoPad: [
@@ -159,17 +194,16 @@ index 000000000..b95d5436c
 +      'same-upper',
 +      'same-lower',
 +    ],
-+    BuildGraphStatus: [
-+      'success',
-+      'error',
-+      'context-lost',
-+      'unknown',
-+    ],
 +    ComputeGraphStatus: [
 +      'success',
 +      'error',
 +      'context-lost',
 +      'unknown',
++    ],
++    DevicePreference: [
++      'default',
++      'gpu',
++      'cpu',
 +    ],
 +    ErrorFilter: [
 +      'none',
@@ -189,13 +223,13 @@ index 000000000..b95d5436c
 +      'ohwi',
 +      'ihwo',
 +    ],
-+    FusedActivation: [
-+      'none',
-+      'relu',
-+    ],
 +    InputOperandLayout: [
 +      'nchw',
 +      'nhwc',
++    ],
++    InterpolationMode: [
++      'nearest-neighbor',
++      'linear',
 +    ],
 +    OperandType: [
 +      'float32',
@@ -204,6 +238,12 @@ index 000000000..b95d5436c
 +      'uint32',
 +      'int8',
 +      'uint8',
++    ],
++    PaddingMode: [
++      'constant',
++      'edge',
++      'reflection',
++      'symmetric',
 +    ],
 +    PowerPreference: [
 +      'default',
@@ -222,7 +262,21 @@ index 000000000..b95d5436c
 +      return array;
 +    },
 +
-+    makeArrayBufferView: function(offset, byteSize, type = "float32") {
++    makeF32Array: function(count, arrayPtr) {
++      if (count === 0 || arrayPtr === 0) {
++        return undefined;
++      }
++      var array = [];
++      for (var i = 0; i < count; ++i, arrayPtr += 4) {
++        array.push({{{ webnn.makeGetF32('arrayPtr', 0) }}});
++      }
++      return array;
++    },
++
++    makeArrayBufferView: function(ptr, type = "float32") {
++      const offset = {{{ makeGetValue('ptr', C_STRUCTS.MLArrayBufferView.buffer, '*') }}} + 
++          {{{ webnn.makeGetU32('ptr', C_STRUCTS.MLArrayBufferView.byteOffset) }}};
++      const byteSize = {{{ webnn.makeGetU32('ptr', C_STRUCTS.MLArrayBufferView.byteLength) }}};
 +      assert(type === "float32");
 +      // TODO: support other array buffer view types.
 +      return new Float32Array(HEAPU8.buffer, offset, byteSize / Float32Array.BYTES_PER_ELEMENT);
@@ -241,7 +295,6 @@ index 000000000..b95d5436c
 +        "bias": this.mgrOperand.get({{{ makeGetValue('ptr', C_STRUCTS.MLBatchNormOptions.bias, '*') }}}),
 +        "axis": {{{ webnn.makeGetI32('ptr', C_STRUCTS.MLBatchNormOptions.axis) }}},
 +        "epsilon": {{{ webnn.makeGetF32('ptr', C_STRUCTS.MLBatchNormOptions.epsilon) }}},
-+        "activation": this.FusedActivation[ {{{ webnn.makeGetI32('ptr', C_STRUCTS.MLBatchNormOptions.activation) }}}],
 +      };
 +    },
 +
@@ -293,8 +346,6 @@ index 000000000..b95d5436c
 +        "filterLayout": this.FilterOperandLayout[
 +          {{{ webnn.makeGetI32('ptr', C_STRUCTS.MLConv2dOptions.filterLayout) }}}
 +        ],
-+        "bias": this.mgrOperand.get({{{ makeGetValue('ptr', C_STRUCTS.MLConv2dOptions.bias, '*') }}}),
-+        "activation": this.FusedActivation[ {{{ webnn.makeGetI32('ptr', C_STRUCTS.MLConv2dOptions.activation) }}}],
 +      };
 +    },
 +
@@ -328,63 +379,64 @@ index 000000000..b95d5436c
 +    },
 +
 +    makeInput: function(ptr) {
++      if ({{{ makeGetValue('ptr', C_STRUCTS.MLInput.dimensions, '*') }}} === 0) {
++        return this.makeArrayBufferView(ptr + {{{ C_STRUCTS.MLInput.resource }}});
++      } else {
++        return {
++          "resource": this.makeArrayBufferView(ptr + {{{ C_STRUCTS.MLInput.resource }}}),
++          "dimensions": this.makeI32Array(
++              {{{ webnn.makeGetU32('ptr', C_STRUCTS.MLInput.dimensionsCount) }}},
++              {{{ makeGetValue('ptr', C_STRUCTS.MLInput.dimensions, '*') }}}
++          ),
++        };
++      }
++    },
++
++    makeTransposeOptions: function(ptr) {
 +      return {
-+        "data": this.makeArrayBufferView(
-+            {{{ makeGetValue('ptr', C_STRUCTS.MLInput.buffer, '*') }}}, 
-+            {{{ webnn.makeGetU32('ptr', C_STRUCTS.MLInput.size) }}}
++        "permutation": this.makeI32Array(
++          {{{ webnn.makeGetU32('ptr', C_STRUCTS.MLTransposeOptions.permutationCount) }}},
++          {{{ makeGetValue('ptr', C_STRUCTS.MLTransposeOptions.permutation, '*') }}}
++        )
++      };
++    },
++
++    makeResampleOptions: function(ptr) {
++      return {
++        "mode": this.InterpolationMode[
++          {{{ webnn.makeGetI32('ptr', C_STRUCTS.MLResampleOptions.mode) }}}
++        ],
++        "scales": this.makeF32Array(
++            {{{ webnn.makeGetU32('ptr', C_STRUCTS.MLResampleOptions.scalesCount) }}},
++            {{{ makeGetValue('ptr', C_STRUCTS.MLResampleOptions.scales, '*') }}}
 +        ),
-+        "dimensions":({{{ makeGetValue('ptr', C_STRUCTS.MLInput.dimensions, '*') }}} === 0) ? undefined :
-+            this.makeI32Array(
-+                {{{ webnn.makeGetU32('ptr', C_STRUCTS.MLInput.dimensionsCount) }}},
-+                {{{ makeGetValue('ptr', C_STRUCTS.MLInput.dimensions, '*') }}}
++        "sizes": this.makeI32Array(
++            {{{ webnn.makeGetU32('ptr', C_STRUCTS.MLResampleOptions.sizesCount) }}},
++            {{{ makeGetValue('ptr', C_STRUCTS.MLResampleOptions.sizes, '*') }}}
 +        ),
 +      };
 +    },
 +
-+    makeOutput: function(ptr) {
-+      return {
-+        "data": ({{{ makeGetValue('ptr', C_STRUCTS.MLOutput.buffer, '*') }}} === 0) ? undefined :
-+            this.makeArrayBufferView(
-+                {{{ makeGetValue('ptr', C_STRUCTS.MLOutput.buffer, '*') }}}, 
-+                {{{ webnn.makeGetU32('ptr', C_STRUCTS.MLOutput.size) }}}
-+        ),
-+        "dimensions":({{{ makeGetValue('ptr', C_STRUCTS.MLOutput.dimensions, '*') }}} === 0) ? undefined :
-+            this.makeI32Array(
-+                {{{ webnn.makeGetU32('ptr', C_STRUCTS.MLOutput.dimensionsCount) }}},
-+                {{{ makeGetValue('ptr', C_STRUCTS.MLOutput.dimensions, '*') }}}
-+        ),
-+      };
-+    },
 +  },
 +
 +  // *Reference/*Release
 +
++  {{{ webnn.makeReferenceRelease('Context') }}}
 +  {{{ webnn.makeReferenceRelease('Graph') }}}
 +  {{{ webnn.makeReferenceRelease('GraphBuilder') }}}
 +  {{{ webnn.makeReferenceRelease('NamedInputs') }}}
 +  {{{ webnn.makeReferenceRelease('NamedOperands') }}}
 +  {{{ webnn.makeReferenceRelease('NamedOutputs') }}}
-+  {{{ webnn.makeReferenceRelease('NamedResults') }}}
-+  {{{ webnn.makeReferenceRelease('Context') }}}
 +  {{{ webnn.makeReferenceRelease('Operand') }}}
-+  {{{ webnn.makeReferenceRelease('Result') }}}
++  {{{ webnn.makeReferenceRelease('Operator') }}}
 +
 +  // Methods of GraphBuilder
-+
-+  mlGraphBuilderInput: function(builderId, namePtr, descPtr) {
++  mlGraphBuilderAdd: function(builderId, aId, bId) {
 +    var builder = WebNN.mgrGraphBuilder.get(builderId);
-+    var name = UTF8ToString(namePtr);
-+    var desc = WebNN.makeOperandDescriptor(descPtr);
-+    var input = builder.input(name, desc);
-+    return WebNN.mgrOperand.create(input);
-+  },
-+
-+  mlGraphBuilderConstant: function(builderId, descPtr, valuePtr, size) {
-+    var builder = WebNN.mgrGraphBuilder.get(builderId);
-+    var desc = WebNN.makeOperandDescriptor(descPtr);
-+    var buffer = WebNN.makeArrayBufferView(valuePtr, size);
-+    var constant = typeof desc.dimensions === 'undefined' ? builder.constant(buffer[0]) : builder.constant(desc, buffer);
-+    return WebNN.mgrOperand.create(constant);
++    var a = WebNN.mgrOperand.get(aId);
++    var b = WebNN.mgrOperand.get(bId);
++    var c = builder.add(a, b);
++    return WebNN.mgrOperand.create(c);
 +  },
 +
 +  mlGraphBuilderAveragePool2d: function(builderId, inputId, optionsPtr) {
@@ -392,14 +444,6 @@ index 000000000..b95d5436c
 +    var input = WebNN.mgrOperand.get(inputId);
 +    var options = WebNN.makePool2dOptions(optionsPtr);
 +    var pool2d = builder.averagePool2d(input, options);
-+    return WebNN.mgrOperand.create(pool2d);
-+  },
-+
-+  mlGraphBuilderMaxPool2d: function(builderId, inputId, optionsPtr) {
-+    var builder = WebNN.mgrGraphBuilder.get(builderId);
-+    var input = WebNN.mgrOperand.get(inputId);
-+    var options = WebNN.makePool2dOptions(optionsPtr);
-+    var pool2d = builder.maxPool2d(input, options);
 +    return WebNN.mgrOperand.create(pool2d);
 +  },
 +
@@ -413,6 +457,26 @@ index 000000000..b95d5436c
 +    return WebNN.mgrOperand.create(output);
 +  },
 +
++  mlGraphBuilderBuild: function(builderId, namedOperandsId) {
++    var builder = WebNN.mgrGraphBuilder.get(builderId);
++    var namedOperands = WebNN.mgrNamedOperands.get(namedOperandsId);
++    try {
++      var graph = builder.build(namedOperands);
++      return WebNN.mgrGraph.create(graph);
++    } catch (error) {
++      console.log('builder.build failed: ' + error);
++      return 0;  // nullptr
++    }
++  },
++
++  mlGraphBuilderClamp: function(builderId, inputId, optionsPtr) {
++    var builder = WebNN.mgrGraphBuilder.get(builderId);
++    var input = WebNN.mgrOperand.get(inputId);
++    var options = WebNN.makeClampOptions(optionsPtr);
++    var clamp = builder.clamp(input, options);
++    return WebNN.mgrOperand.create(clamp);
++  },
++
 +  mlGraphBuilderConcat: function(builderId, inputsCount, inputsPtr, axis) {
 +    var builder = WebNN.mgrGraphBuilder.get(builderId);
 +    var inputIds = WebNN.makeI32Array(inputsCount, inputsPtr);
@@ -424,36 +488,17 @@ index 000000000..b95d5436c
 +    return WebNN.mgrOperand.create(output);
 +  },
 +
-+  mlGraphBuilderGemm: function(builderId, aId, bId, optionsPtr) {
++  mlGraphBuilderConstant: function(builderId, descPtr, arrayBufferViewPtr) {
 +    var builder = WebNN.mgrGraphBuilder.get(builderId);
-+    var a = WebNN.mgrOperand.get(aId);
-+    var b = WebNN.mgrOperand.get(bId);
-+    var options = WebNN.makeGemmOptions(optionsPtr);
-+    var output = builder.gemm(a, b, options);
-+    return WebNN.mgrOperand.create(output);
-+  },
-+
-+  mlGraphBuilderReshape: function(builderId, inputId, newShapePtr, newShapeCount) {
-+    var builder = WebNN.mgrGraphBuilder.get(builderId);
-+    var input = WebNN.mgrOperand.get(inputId);
-+    var newShape = WebNN.makeI32Array(newShapeCount, newShapePtr);
-+    var output = builder.reshape(input, newShape);
-+    return WebNN.mgrOperand.create(output);
-+  },
-+
-+  mlGraphBuilderMatmul: function(builderId, aId, bId) {
-+    var builder = WebNN.mgrGraphBuilder.get(builderId);
-+    var a = WebNN.mgrOperand.get(aId);
-+    var b = WebNN.mgrOperand.get(bId);
-+    var c = builder.matmul(a, b);
-+    return WebNN.mgrOperand.create(c);
-+  },
-+
-+  mlGraphBuilderRelu: function(builderId, inputId) {
-+    var builder = WebNN.mgrGraphBuilder.get(builderId);
-+    var input = WebNN.mgrOperand.get(inputId);
-+    var output = builder.relu(input);
-+    return WebNN.mgrOperand.create(output);
++    var desc = WebNN.makeOperandDescriptor(descPtr);
++    var buffer = WebNN.makeArrayBufferView(arrayBufferViewPtr, desc.type);
++    var constant;
++    if (desc.dimensions === undefined) {
++      constant = builder.constant(buffer[0]);
++    } else {
++      constant = builder.constant(desc, buffer);
++    }
++    return WebNN.mgrOperand.create(constant);
 +  },
 +
 +  mlGraphBuilderConv2d: function(builderId, inputId, filterId, optionsPtr) {
@@ -465,20 +510,99 @@ index 000000000..b95d5436c
 +    return WebNN.mgrOperand.create(conv2d);
 +  },
 +
-+  mlGraphBuilderClamp: function(builderId, inputId, optionsPtr) {
-+    var builder = WebNN.mgrGraphBuilder.get(builderId);
-+    var input = WebNN.mgrOperand.get(inputId);
-+    var options = WebNN.makeClampOptions(optionsPtr);
-+    var clamp = builder.clamp(input, options);
-+    return WebNN.mgrOperand.create(clamp);
-+  },
-+
-+  mlGraphBuilderAdd: function(builderId, aId, bId) {
++  mlGraphBuilderDiv: function(builderId, aId, bId) {
 +    var builder = WebNN.mgrGraphBuilder.get(builderId);
 +    var a = WebNN.mgrOperand.get(aId);
 +    var b = WebNN.mgrOperand.get(bId);
-+    var c = builder.add(a, b);
++    var c = builder.div(a, b);
 +    return WebNN.mgrOperand.create(c);
++  },
++
++  mlGraphBuilderGemm: function(builderId, aId, bId, optionsPtr) {
++    var builder = WebNN.mgrGraphBuilder.get(builderId);
++    var a = WebNN.mgrOperand.get(aId);
++    var b = WebNN.mgrOperand.get(bId);
++    var options = WebNN.makeGemmOptions(optionsPtr);
++    var output = builder.gemm(a, b, options);
++    return WebNN.mgrOperand.create(output);
++  },
++
++  mlGraphBuilderInput: function(builderId, namePtr, descPtr) {
++    var builder = WebNN.mgrGraphBuilder.get(builderId);
++    var name = UTF8ToString(namePtr);
++    var desc = WebNN.makeOperandDescriptor(descPtr);
++    var input = builder.input(name, desc);
++    return WebNN.mgrOperand.create(input);
++  },
++
++  mlGraphBuilderMatmul: function(builderId, aId, bId) {
++    var builder = WebNN.mgrGraphBuilder.get(builderId);
++    var a = WebNN.mgrOperand.get(aId);
++    var b = WebNN.mgrOperand.get(bId);
++    var c = builder.matmul(a, b);
++    return WebNN.mgrOperand.create(c);
++  },
++
++  mlGraphBuilderMaxPool2d: function(builderId, inputId, optionsPtr) {
++    var builder = WebNN.mgrGraphBuilder.get(builderId);
++    var input = WebNN.mgrOperand.get(inputId);
++    var options = WebNN.makePool2dOptions(optionsPtr);
++    var pool2d = builder.maxPool2d(input, options);
++    return WebNN.mgrOperand.create(pool2d);
++  },
++
++  mlGraphBuilderMul: function(builderId, aId, bId) {
++    var builder = WebNN.mgrGraphBuilder.get(builderId);
++    var a = WebNN.mgrOperand.get(aId);
++    var b = WebNN.mgrOperand.get(bId);
++    var c = builder.mul(a, b);
++    return WebNN.mgrOperand.create(c);
++  },
++
++  mlGraphBuilderRelu: function(builderId, inputId) {
++    var builder = WebNN.mgrGraphBuilder.get(builderId);
++    var input = WebNN.mgrOperand.get(inputId);
++    var output = builder.relu(input);
++    return WebNN.mgrOperand.create(output);
++  },
++
++  mlGraphBuilderResample: function(builderId, inputId, optionsPtr) {
++    var builder = WebNN.mgrGraphBuilder.get(builderId);
++    var input = WebNN.mgrOperand.get(inputId);
++    var options = WebNN.makeResampleOptions(optionsPtr);
++    var output = builder.resample(input, options);
++    return WebNN.mgrOperand.create(output);
++  },
++
++  mlGraphBuilderReshape: function(builderId, inputId, newShapePtr, newShapeCount) {
++    var builder = WebNN.mgrGraphBuilder.get(builderId);
++    var input = WebNN.mgrOperand.get(inputId);
++    var newShape = WebNN.makeI32Array(newShapeCount, newShapePtr);
++    var output = builder.reshape(input, newShape);
++    return WebNN.mgrOperand.create(output);
++  },
++
++  mlGraphBuilderSoftmax: function(builderId, inputId) {
++    var builder = WebNN.mgrGraphBuilder.get(builderId);
++    var input = WebNN.mgrOperand.get(inputId);
++    var output = builder.softmax(input);
++    return WebNN.mgrOperand.create(output);
++  },
++
++  mlGraphBuilderSub: function(builderId, aId, bId) {
++    var builder = WebNN.mgrGraphBuilder.get(builderId);
++    var a = WebNN.mgrOperand.get(aId);
++    var b = WebNN.mgrOperand.get(bId);
++    var c = builder.sub(a, b);
++    return WebNN.mgrOperand.create(c);
++  },
++
++  mlGraphBuilderTranspose: function(builderId, inputId, optionsPtr) {
++    var builder = WebNN.mgrGraphBuilder.get(builderId);
++    var input = WebNN.mgrOperand.get(inputId);
++    var options = WebNN.makeTransposeOptions(optionsPtr);
++    var output = builder.transpose(input, options);
++    return WebNN.mgrOperand.create(output);
 +  },
 +
 +  webnnCreateNamedInputs: function() {
@@ -498,10 +622,10 @@ index 000000000..b95d5436c
 +    return WebNN.mgrNamedOutputs.create(outputs);
 +  },
 +
-+  mlNamedOutputsSet: function(namedOutputsId, namePtr, outputPtr) {
++  mlNamedOutputsSet: function(namedOutputsId, namePtr, arrayBufferViewPtr) {
 +    var namedOutputs = WebNN.mgrNamedOutputs.get(namedOutputsId);
 +    var name = UTF8ToString(namePtr);
-+    var output = WebNN.makeOutput(outputPtr);
++    var output = WebNN.makeArrayBufferView(arrayBufferViewPtr);
 +    namedOutputs[name] = output;
 +  },
 +
@@ -523,48 +647,12 @@ index 000000000..b95d5436c
 +    return WebNN.mgrGraphBuilder.create(builder);
 +  },
 +
-+  mlGraphBuilderBuild: function(builderId, namedOperandsId, callback, userdata) {
-+    var builder = WebNN.mgrGraphBuilder.get(builderId);
-+    var namedOperands = WebNN.mgrNamedOperands.get(namedOperandsId);
-+    builder.build(namedOperands).then(function(graph) {
-+      var graphId = WebNN.mgrGraph.create(graph);
-+      {{{ makeDynCall('viiii', 'callback') }}}(0 /* MLBuildGraphStatus_Success */, graphId, 0, userdata);
-+    }, function(error) {
-+      var messagePtr = allocateUTF8(error.message);
-+      {{{ makeDynCall('viiii', 'callback') }}}(1 /* MLBuildGraphStatus_Error */, 0, messagePtr, userdata);
-+    });
-+  },
-+
-+  mlGraphBuilderBuildSync: function(builderId, namedOperandsId) {
-+    var builder = WebNN.mgrGraphBuilder.get(builderId);
-+    var namedOperands = WebNN.mgrNamedOperands.get(namedOperandsId);
-+    try {
-+      var graph = builder.buildSync(namedOperands);
-+      return WebNN.mgrGraph.create(graph);
-+    } catch (error) {
-+      console.log('builder.buildSync failed: ' + error);
-+      return 0;  // nullptr
-+    }
-+  },
-+
-+  mlGraphCompute: function(graphId, inputsId, callback, userdata, outputsId) {
-+    var graph = WebNN.mgrGraph.get(graphId);
-+    var inputs = WebNN.mgrNamedInputs.get(inputsId);
-+    var outputs = outputsId === 0 ? undefined : WebNN.mgrNamedOutputs.get(outputsId);
-+    graph.compute(inputs, outputs).then(function(results) {
-+      // TODO: implement results
-+      {{{ makeDynCall('viiii', 'callback') }}}(0 /* MLComputeGraphStatus_Success */, 0, 0, userdata);
-+    }, function(error) {
-+      var messagePtr = allocateUTF8(error.message);
-+      {{{ makeDynCall('viiii', 'callback') }}}(1 /* MLComputeGraphStatus_Error */, 0, messagePtr, userdata);
-+    });
-+  },
-+
-+  mlGraphComputeSync: function(graphId, inputsId, outputsId) {
++  
++  mlGraphCompute: function(graphId, inputsId, outputsId) {
 +    var graph = WebNN.mgrGraph.get(graphId);
 +    var inputs = WebNN.mgrNamedInputs.get(inputsId);
 +    var outputs = WebNN.mgrNamedOutputs.get(outputsId);
-+    return graph.computeSync(inputs, outputs);
++    return graph.compute(inputs, outputs);
 +  },
 +
 +};
@@ -602,11 +690,39 @@ index eb43818c9..80267c4a1 100644
  // Enables building of stb-image, a tiny public-domain library for decoding
  // images, allowing decoding of images without using the browser's built-in
  // decoders. The benefit is that this can be done synchronously, however, it
+diff --git a/src/shell.js b/src/shell.js
+index 95aca271e..484cf8e75 100644
+--- a/src/shell.js
++++ b/src/shell.js
+@@ -197,14 +197,16 @@ if (ENVIRONMENT_IS_NODE) {
+   Module['inspect'] = function () { return '[Emscripten Module object]'; };
+ 
+ #if USE_PTHREADS
+-  var nodeWorkerThreads;
+-  try {
+-    nodeWorkerThreads = require('worker_threads');
+-  } catch (e) {
+-    console.error('The "worker_threads" module is not supported in this node.js build - perhaps a newer version is needed?');
+-    throw e;
++  if (global.Worker === undefined) {
++    var nodeWorkerThreads;
++    try {
++      nodeWorkerThreads = require('worker_threads');
++    } catch (e) {
++      console.error('The "worker_threads" module is not supported in this node.js build - perhaps a newer version is needed?');
++      throw e;
++    }
++    global.Worker = nodeWorkerThreads.Worker;
+   }
+-  global.Worker = nodeWorkerThreads.Worker;
+ #endif
+ 
+ #if WASM == 2
 diff --git a/src/struct_info.json b/src/struct_info.json
-index 84793c90c..97cade861 100644
+index 84793c90c..e393dcb1a 100644
 --- a/src/struct_info.json
 +++ b/src/struct_info.json
-@@ -1539,6 +1539,83 @@
+@@ -1539,6 +1539,101 @@
              ]
          }
      },
@@ -614,18 +730,23 @@ index 84793c90c..97cade861 100644
 +        "file": "webnn/webnn.h",
 +        "defines": [],
 +        "structs": {
++            "MLArrayBufferView": [
++                "buffer",
++                "byteLength",
++                "byteOffset"
++            ],
 +            "MLBatchNormOptions": [
 +                "scale",
 +                "bias",
 +                "axis",
-+                "epsilon",
-+                "activation"
++                "epsilon"
 +            ],
 +            "MLClampOptions": [
 +                "minValue",
 +                "maxValue"
 +            ],
 +            "MLContextOptions": [
++                "devicePreference",
 +                "powerPreference"
 +            ],
 +            "MLConv2dOptions": [
@@ -638,9 +759,7 @@ index 84793c90c..97cade861 100644
 +                "autoPad",
 +                "groups",
 +                "inputLayout",
-+                "filterLayout",
-+                "bias",
-+                "activation"
++                "filterLayout"
 +            ],
 +            "MLGemmOptions": [
 +                "c",
@@ -649,11 +768,11 @@ index 84793c90c..97cade861 100644
 +                "aTranspose",
 +                "bTranspose"
 +            ],
-+            "MLInput": [
-+                "buffer",
-+                "size",
-+                "dimensions",
-+                "dimensionsCount"
++            "MLInstanceNormOptions": [
++                "scale",
++                "bias",
++                "epsilon",
++                "layout"
 +            ],
 +            "MLLeakyReluOptions": [
 +                "alpha"
@@ -663,11 +782,9 @@ index 84793c90c..97cade861 100644
 +                "dimensions",
 +                "dimensionsCount"
 +            ],
-+            "MLOutput": [
-+                "buffer",
-+                "size",
-+                "dimensions",
-+                "dimensionsCount"
++            "MLPadOptions": [
++                "mode",
++                "value"
 +            ],
 +            "MLPool2dOptions": [
 +                "windowDimensionsCount",
@@ -681,9 +798,26 @@ index 84793c90c..97cade861 100644
 +                "autoPad",
 +                "layout"
 +            ],
++            "MLReduceMeanOptions": [
++                "axesCount",
++                "axes",
++                "keepDimensions"
++            ],
++            "MLResampleOptions": [
++                "mode",
++                "scalesCount",
++                "scales",
++                "sizesCount",
++                "sizes"
++            ],
 +            "MLTransposeOptions": [
 +                "permutationCount",
 +                "permutation"
++            ],
++            "MLInput": [
++                "resource",
++                "dimensions",
++                "dimensionsCount"
 +            ]
 +        }
 +    },
@@ -691,7 +825,7 @@ index 84793c90c..97cade861 100644
      // WebGPU
      //   NOTE: This can be (mostly) auto-generated:
 diff --git a/src/worker.js b/src/worker.js
-index 1a9ff901c..84d6e44f2 100644
+index 1a9ff901c..81cfcb2bf 100644
 --- a/src/worker.js
 +++ b/src/worker.js
 @@ -232,7 +232,7 @@ this.onmessage = function(e) {
@@ -703,9 +837,18 @@ index 1a9ff901c..84d6e44f2 100644
            if (typeof(Module['_emscripten_futex_wake']) !== "function") {
              err("Thread Initialisation failed.");
              throw ex;
+@@ -288,7 +288,7 @@ this.onmessage = function(e) {
+ 
+ #if ENVIRONMENT_MAY_BE_NODE
+ // Node.js support
+-if (typeof process === 'object' && typeof process.versions === 'object' && typeof process.versions.node === 'string') {
++if (typeof process === 'object' && typeof process.versions === 'object' && typeof process.versions.node === 'string' && global.Worker === undefined) {
+   // Create as web-worker-like an environment as we can.
+   self = {
+     location: {
 diff --git a/system/include/emscripten/html5_webnn.h b/system/include/emscripten/html5_webnn.h
 new file mode 100644
-index 000000000..9192c4d1b
+index 000000000..055dc084f
 --- /dev/null
 +++ b/system/include/emscripten/html5_webnn.h
 @@ -0,0 +1,20 @@
@@ -724,7 +867,7 @@ index 000000000..9192c4d1b
 +extern "C" {
 +#endif
 +
-+MLContext emscripten_webnn_create_context(void);
++MLContext emscripten_webnn_create_context(MLContextOptions const* options = nullptr);
 +
 +#ifdef __cplusplus
 +} // ~extern "C"
@@ -883,10 +1026,10 @@ index 000000000..bdef1df3d
 +#endif  // WEBNN_ENUM_CLASS_BITMASKS_H_
 diff --git a/system/include/webnn/webnn.h b/system/include/webnn/webnn.h
 new file mode 100644
-index 000000000..67dd9241f
+index 000000000..09437ae7e
 --- /dev/null
 +++ b/system/include/webnn/webnn.h
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,398 @@
 +// Licensed under the Apache License, Version 2.0 (the "License");
 +// you may not use this file except in compliance with the License.
 +// You may obtain a copy of the License at
@@ -932,9 +1075,8 @@ index 000000000..67dd9241f
 +typedef struct MLNamedInputsImpl* MLNamedInputs;
 +typedef struct MLNamedOperandsImpl* MLNamedOperands;
 +typedef struct MLNamedOutputsImpl* MLNamedOutputs;
-+typedef struct MLNamedResultsImpl* MLNamedResults;
 +typedef struct MLOperandImpl* MLOperand;
-+typedef struct MLResultImpl* MLResult;
++typedef struct MLOperatorImpl* MLOperator;
 +
 +typedef enum MLAutoPad {
 +    MLAutoPad_Explicit = 0x00000000,
@@ -943,14 +1085,6 @@ index 000000000..67dd9241f
 +    MLAutoPad_Force32 = 0x7FFFFFFF
 +} MLAutoPad;
 +
-+typedef enum MLBuildGraphStatus {
-+    MLBuildGraphStatus_Success = 0x00000000,
-+    MLBuildGraphStatus_Error = 0x00000001,
-+    MLBuildGraphStatus_ContextLost = 0x00000002,
-+    MLBuildGraphStatus_Unknown = 0x00000003,
-+    MLBuildGraphStatus_Force32 = 0x7FFFFFFF
-+} MLBuildGraphStatus;
-+
 +typedef enum MLComputeGraphStatus {
 +    MLComputeGraphStatus_Success = 0x00000000,
 +    MLComputeGraphStatus_Error = 0x00000001,
@@ -958,6 +1092,13 @@ index 000000000..67dd9241f
 +    MLComputeGraphStatus_Unknown = 0x00000003,
 +    MLComputeGraphStatus_Force32 = 0x7FFFFFFF
 +} MLComputeGraphStatus;
++
++typedef enum MLDevicePreference {
++    MLDevicePreference_Default = 0x00000000,
++    MLDevicePreference_Gpu = 0x00000001,
++    MLDevicePreference_Cpu = 0x00000002,
++    MLDevicePreference_Force32 = 0x7FFFFFFF
++} MLDevicePreference;
 +
 +typedef enum MLErrorFilter {
 +    MLErrorFilter_None = 0x00000000,
@@ -983,17 +1124,17 @@ index 000000000..67dd9241f
 +    MLFilterOperandLayout_Force32 = 0x7FFFFFFF
 +} MLFilterOperandLayout;
 +
-+typedef enum MLFusedActivation {
-+    MLFusedActivation_None = 0x00000000,
-+    MLFusedActivation_Relu = 0x00000001,
-+    MLFusedActivation_Force32 = 0x7FFFFFFF
-+} MLFusedActivation;
-+
 +typedef enum MLInputOperandLayout {
 +    MLInputOperandLayout_Nchw = 0x00000000,
 +    MLInputOperandLayout_Nhwc = 0x00000001,
 +    MLInputOperandLayout_Force32 = 0x7FFFFFFF
 +} MLInputOperandLayout;
++
++typedef enum MLInterpolationMode {
++    MLInterpolationMode_NearestNeighbor = 0x00000000,
++    MLInterpolationMode_Linear = 0x00000001,
++    MLInterpolationMode_Force32 = 0x7FFFFFFF
++} MLInterpolationMode;
 +
 +typedef enum MLOperandType {
 +    MLOperandType_Float32 = 0x00000000,
@@ -1005,6 +1146,14 @@ index 000000000..67dd9241f
 +    MLOperandType_Force32 = 0x7FFFFFFF
 +} MLOperandType;
 +
++typedef enum MLPaddingMode {
++    MLPaddingMode_Constant = 0x00000000,
++    MLPaddingMode_Edge = 0x00000001,
++    MLPaddingMode_Reflection = 0x00000002,
++    MLPaddingMode_Symmetric = 0x00000003,
++    MLPaddingMode_Force32 = 0x7FFFFFFF
++} MLPaddingMode;
++
 +typedef enum MLPowerPreference {
 +    MLPowerPreference_Default = 0x00000000,
 +    MLPowerPreference_High_performance = 0x00000001,
@@ -1013,12 +1162,17 @@ index 000000000..67dd9241f
 +} MLPowerPreference;
 +
 +
++typedef struct MLArrayBufferView {
++    void * buffer;
++    size_t byteLength;
++    size_t byteOffset;
++} MLArrayBufferView;
++
 +typedef struct MLBatchNormOptions {
 +    MLOperand scale;
 +    MLOperand bias;
 +    uint32_t axis;
 +    float epsilon;
-+    MLFusedActivation activation;
 +} MLBatchNormOptions;
 +
 +typedef struct MLClampOptions {
@@ -1027,6 +1181,7 @@ index 000000000..67dd9241f
 +} MLClampOptions;
 +
 +typedef struct MLContextOptions {
++    MLDevicePreference devicePreference;
 +    MLPowerPreference powerPreference;
 +} MLContextOptions;
 +
@@ -1041,8 +1196,6 @@ index 000000000..67dd9241f
 +    int32_t groups;
 +    MLInputOperandLayout inputLayout;
 +    MLFilterOperandLayout filterLayout;
-+    MLOperand bias;
-+    MLFusedActivation activation;
 +} MLConv2dOptions;
 +
 +typedef struct MLGemmOptions {
@@ -1053,12 +1206,12 @@ index 000000000..67dd9241f
 +    bool bTranspose;
 +} MLGemmOptions;
 +
-+typedef struct MLInput {
-+    void const * buffer;
-+    size_t size;
-+    int32_t const * dimensions;
-+    uint32_t dimensionsCount;
-+} MLInput;
++typedef struct MLInstanceNormOptions {
++    MLOperand scale;
++    MLOperand bias;
++    float epsilon;
++    MLInputOperandLayout layout;
++} MLInstanceNormOptions;
 +
 +typedef struct MLLeakyReluOptions {
 +    float alpha;
@@ -1070,12 +1223,10 @@ index 000000000..67dd9241f
 +    uint32_t dimensionsCount;
 +} MLOperandDescriptor;
 +
-+typedef struct MLOutput {
-+    void * buffer;
-+    size_t size;
-+    int32_t const * dimensions;
-+    uint32_t dimensionsCount;
-+} MLOutput;
++typedef struct MLPadOptions {
++    MLPaddingMode mode;
++    float value;
++} MLPadOptions;
 +
 +typedef struct MLPool2dOptions {
 +    uint32_t windowDimensionsCount;
@@ -1090,18 +1241,36 @@ index 000000000..67dd9241f
 +    MLInputOperandLayout layout;
 +} MLPool2dOptions;
 +
++typedef struct MLReduceMeanOptions {
++    uint32_t axesCount;
++    int32_t const * axes;
++    bool keepDimensions;
++} MLReduceMeanOptions;
++
++typedef struct MLResampleOptions {
++    MLInterpolationMode mode;
++    uint32_t scalesCount;
++    float const * scales;
++    uint32_t sizesCount;
++    int32_t const * sizes;
++} MLResampleOptions;
++
 +typedef struct MLTransposeOptions {
 +    uint32_t permutationCount;
 +    int32_t const * permutation;
 +} MLTransposeOptions;
++
++typedef struct MLInput {
++    MLArrayBufferView resource;
++    int32_t const * dimensions;
++    uint32_t dimensionsCount;
++} MLInput;
 +
 +
 +#ifdef __cplusplus
 +extern "C" {
 +#endif
 +
-+typedef void (*MLBuildGraphCallback)(MLBuildGraphStatus status, MLGraph graph, char const * message, void * userdata);
-+typedef void (*MLComputeGraphCallback)(MLComputeGraphStatus status, MLNamedResults outputs, char const * message, void * userdata);
 +typedef void (*MLErrorCallback)(MLErrorType type, char const * message, void * userdata);
 +
 +typedef void (*WebnnProc)(void);
@@ -1121,8 +1290,7 @@ index 000000000..67dd9241f
 +typedef void (*WebnnProcContextRelease)(MLContext context);
 +
 +// Procs of Graph
-+typedef void (*WebnnProcGraphCompute)(MLGraph graph, MLNamedInputs inputs, MLComputeGraphCallback callback, void * userdata, MLNamedOutputs outputs);
-+typedef MLComputeGraphStatus (*WebnnProcGraphComputeSync)(MLGraph graph, MLNamedInputs inputs, MLNamedOutputs outputs);
++typedef MLComputeGraphStatus (*WebnnProcGraphCompute)(MLGraph graph, MLNamedInputs inputs, MLNamedOutputs outputs);
 +typedef void (*WebnnProcGraphReference)(MLGraph graph);
 +typedef void (*WebnnProcGraphRelease)(MLGraph graph);
 +
@@ -1130,22 +1298,28 @@ index 000000000..67dd9241f
 +typedef MLOperand (*WebnnProcGraphBuilderAdd)(MLGraphBuilder graphBuilder, MLOperand a, MLOperand b);
 +typedef MLOperand (*WebnnProcGraphBuilderAveragePool2d)(MLGraphBuilder graphBuilder, MLOperand input, MLPool2dOptions const * options);
 +typedef MLOperand (*WebnnProcGraphBuilderBatchNorm)(MLGraphBuilder graphBuilder, MLOperand input, MLOperand mean, MLOperand variance, MLBatchNormOptions const * options);
-+typedef void (*WebnnProcGraphBuilderBuild)(MLGraphBuilder graphBuilder, MLNamedOperands namedOperands, MLBuildGraphCallback callback, void * userdata);
-+typedef MLGraph (*WebnnProcGraphBuilderBuildSync)(MLGraphBuilder graphBuilder, MLNamedOperands namedOperands);
++typedef MLGraph (*WebnnProcGraphBuilderBuild)(MLGraphBuilder graphBuilder, MLNamedOperands namedOperands);
 +typedef MLOperand (*WebnnProcGraphBuilderClamp)(MLGraphBuilder graphBuilder, MLOperand input, MLClampOptions const * options);
 +typedef MLOperand (*WebnnProcGraphBuilderConcat)(MLGraphBuilder graphBuilder, uint32_t inputsCount, MLOperand const * inputs, uint32_t axis);
-+typedef MLOperand (*WebnnProcGraphBuilderConstant)(MLGraphBuilder graphBuilder, MLOperandDescriptor const * desc, void const * value, size_t size);
++typedef MLOperand (*WebnnProcGraphBuilderConstant)(MLGraphBuilder graphBuilder, MLOperandDescriptor const * desc, MLArrayBufferView const * value);
 +typedef MLOperand (*WebnnProcGraphBuilderConv2d)(MLGraphBuilder graphBuilder, MLOperand input, MLOperand filter, MLConv2dOptions const * options);
++typedef MLOperand (*WebnnProcGraphBuilderDiv)(MLGraphBuilder graphBuilder, MLOperand a, MLOperand b);
 +typedef MLOperand (*WebnnProcGraphBuilderGemm)(MLGraphBuilder graphBuilder, MLOperand a, MLOperand b, MLGemmOptions const * options);
 +typedef MLOperand (*WebnnProcGraphBuilderInput)(MLGraphBuilder graphBuilder, char const * name, MLOperandDescriptor const * desc);
++typedef MLOperand (*WebnnProcGraphBuilderInstanceNorm)(MLGraphBuilder graphBuilder, MLOperand input, MLInstanceNormOptions const * options);
 +typedef MLOperand (*WebnnProcGraphBuilderLeakyRelu)(MLGraphBuilder graphBuilder, MLOperand input, MLLeakyReluOptions const * options);
 +typedef MLOperand (*WebnnProcGraphBuilderMatmul)(MLGraphBuilder graphBuilder, MLOperand a, MLOperand b);
 +typedef MLOperand (*WebnnProcGraphBuilderMaxPool2d)(MLGraphBuilder graphBuilder, MLOperand input, MLPool2dOptions const * options);
 +typedef MLOperand (*WebnnProcGraphBuilderMul)(MLGraphBuilder graphBuilder, MLOperand a, MLOperand b);
++typedef MLOperand (*WebnnProcGraphBuilderPad)(MLGraphBuilder graphBuilder, MLOperand input, MLOperand padding, MLPadOptions const * options);
++typedef MLOperand (*WebnnProcGraphBuilderReduceMean)(MLGraphBuilder graphBuilder, MLOperand input, MLReduceMeanOptions const * options);
 +typedef MLOperand (*WebnnProcGraphBuilderRelu)(MLGraphBuilder graphBuilder, MLOperand input);
++typedef MLOperand (*WebnnProcGraphBuilderResample)(MLGraphBuilder graphBuilder, MLOperand input, MLResampleOptions const * options);
 +typedef MLOperand (*WebnnProcGraphBuilderReshape)(MLGraphBuilder graphBuilder, MLOperand input, int32_t const * newShape, uint32_t newShapeCount);
++typedef MLOperand (*WebnnProcGraphBuilderSigmoid)(MLGraphBuilder graphBuilder, MLOperand input);
 +typedef MLOperand (*WebnnProcGraphBuilderSoftmax)(MLGraphBuilder graphBuilder, MLOperand input);
 +typedef MLOperand (*WebnnProcGraphBuilderSub)(MLGraphBuilder graphBuilder, MLOperand a, MLOperand b);
++typedef MLOperand (*WebnnProcGraphBuilderTanh)(MLGraphBuilder graphBuilder, MLOperand input);
 +typedef MLOperand (*WebnnProcGraphBuilderTranspose)(MLGraphBuilder graphBuilder, MLOperand input, MLTransposeOptions const * options);
 +typedef void (*WebnnProcGraphBuilderReference)(MLGraphBuilder graphBuilder);
 +typedef void (*WebnnProcGraphBuilderRelease)(MLGraphBuilder graphBuilder);
@@ -1161,26 +1335,17 @@ index 000000000..67dd9241f
 +typedef void (*WebnnProcNamedOperandsRelease)(MLNamedOperands namedOperands);
 +
 +// Procs of NamedOutputs
-+typedef void (*WebnnProcNamedOutputsSet)(MLNamedOutputs namedOutputs, char const * name, MLOutput const * output);
++typedef void (*WebnnProcNamedOutputsSet)(MLNamedOutputs namedOutputs, char const * name, MLArrayBufferView const * resource);
 +typedef void (*WebnnProcNamedOutputsReference)(MLNamedOutputs namedOutputs);
 +typedef void (*WebnnProcNamedOutputsRelease)(MLNamedOutputs namedOutputs);
-+
-+// Procs of NamedResults
-+typedef MLResult (*WebnnProcNamedResultsGet)(MLNamedResults namedResults, char const * name);
-+typedef void (*WebnnProcNamedResultsReference)(MLNamedResults namedResults);
-+typedef void (*WebnnProcNamedResultsRelease)(MLNamedResults namedResults);
 +
 +// Procs of Operand
 +typedef void (*WebnnProcOperandReference)(MLOperand operand);
 +typedef void (*WebnnProcOperandRelease)(MLOperand operand);
 +
-+// Procs of Result
-+typedef const void* (*WebnnProcResultBuffer)(MLResult result);
-+typedef uint32_t (*WebnnProcResultBufferSize)(MLResult result);
-+typedef const int32_t* (*WebnnProcResultDimensions)(MLResult result);
-+typedef uint32_t (*WebnnProcResultDimensionsSize)(MLResult result);
-+typedef void (*WebnnProcResultReference)(MLResult result);
-+typedef void (*WebnnProcResultRelease)(MLResult result);
++// Procs of Operator
++typedef void (*WebnnProcOperatorReference)(MLOperator mlOperator);
++typedef void (*WebnnProcOperatorRelease)(MLOperator mlOperator);
 +
 +#endif  // !defined(WEBNN_SKIP_PROCS)
 +
@@ -1199,8 +1364,7 @@ index 000000000..67dd9241f
 +WEBNN_EXPORT void mlContextRelease(MLContext context);
 +
 +// Methods of Graph
-+WEBNN_EXPORT void mlGraphCompute(MLGraph graph, MLNamedInputs inputs, MLComputeGraphCallback callback, void * userdata, MLNamedOutputs outputs);
-+WEBNN_EXPORT MLComputeGraphStatus mlGraphComputeSync(MLGraph graph, MLNamedInputs inputs, MLNamedOutputs outputs);
++WEBNN_EXPORT MLComputeGraphStatus mlGraphCompute(MLGraph graph, MLNamedInputs inputs, MLNamedOutputs outputs);
 +WEBNN_EXPORT void mlGraphReference(MLGraph graph);
 +WEBNN_EXPORT void mlGraphRelease(MLGraph graph);
 +
@@ -1208,22 +1372,28 @@ index 000000000..67dd9241f
 +WEBNN_EXPORT MLOperand mlGraphBuilderAdd(MLGraphBuilder graphBuilder, MLOperand a, MLOperand b);
 +WEBNN_EXPORT MLOperand mlGraphBuilderAveragePool2d(MLGraphBuilder graphBuilder, MLOperand input, MLPool2dOptions const * options);
 +WEBNN_EXPORT MLOperand mlGraphBuilderBatchNorm(MLGraphBuilder graphBuilder, MLOperand input, MLOperand mean, MLOperand variance, MLBatchNormOptions const * options);
-+WEBNN_EXPORT void mlGraphBuilderBuild(MLGraphBuilder graphBuilder, MLNamedOperands namedOperands, MLBuildGraphCallback callback, void * userdata);
-+WEBNN_EXPORT MLGraph mlGraphBuilderBuildSync(MLGraphBuilder graphBuilder, MLNamedOperands namedOperands);
++WEBNN_EXPORT MLGraph mlGraphBuilderBuild(MLGraphBuilder graphBuilder, MLNamedOperands namedOperands);
 +WEBNN_EXPORT MLOperand mlGraphBuilderClamp(MLGraphBuilder graphBuilder, MLOperand input, MLClampOptions const * options);
 +WEBNN_EXPORT MLOperand mlGraphBuilderConcat(MLGraphBuilder graphBuilder, uint32_t inputsCount, MLOperand const * inputs, uint32_t axis);
-+WEBNN_EXPORT MLOperand mlGraphBuilderConstant(MLGraphBuilder graphBuilder, MLOperandDescriptor const * desc, void const * value, size_t size);
++WEBNN_EXPORT MLOperand mlGraphBuilderConstant(MLGraphBuilder graphBuilder, MLOperandDescriptor const * desc, MLArrayBufferView const * value);
 +WEBNN_EXPORT MLOperand mlGraphBuilderConv2d(MLGraphBuilder graphBuilder, MLOperand input, MLOperand filter, MLConv2dOptions const * options);
++WEBNN_EXPORT MLOperand mlGraphBuilderDiv(MLGraphBuilder graphBuilder, MLOperand a, MLOperand b);
 +WEBNN_EXPORT MLOperand mlGraphBuilderGemm(MLGraphBuilder graphBuilder, MLOperand a, MLOperand b, MLGemmOptions const * options);
 +WEBNN_EXPORT MLOperand mlGraphBuilderInput(MLGraphBuilder graphBuilder, char const * name, MLOperandDescriptor const * desc);
++WEBNN_EXPORT MLOperand mlGraphBuilderInstanceNorm(MLGraphBuilder graphBuilder, MLOperand input, MLInstanceNormOptions const * options);
 +WEBNN_EXPORT MLOperand mlGraphBuilderLeakyRelu(MLGraphBuilder graphBuilder, MLOperand input, MLLeakyReluOptions const * options);
 +WEBNN_EXPORT MLOperand mlGraphBuilderMatmul(MLGraphBuilder graphBuilder, MLOperand a, MLOperand b);
 +WEBNN_EXPORT MLOperand mlGraphBuilderMaxPool2d(MLGraphBuilder graphBuilder, MLOperand input, MLPool2dOptions const * options);
 +WEBNN_EXPORT MLOperand mlGraphBuilderMul(MLGraphBuilder graphBuilder, MLOperand a, MLOperand b);
++WEBNN_EXPORT MLOperand mlGraphBuilderPad(MLGraphBuilder graphBuilder, MLOperand input, MLOperand padding, MLPadOptions const * options);
++WEBNN_EXPORT MLOperand mlGraphBuilderReduceMean(MLGraphBuilder graphBuilder, MLOperand input, MLReduceMeanOptions const * options);
 +WEBNN_EXPORT MLOperand mlGraphBuilderRelu(MLGraphBuilder graphBuilder, MLOperand input);
++WEBNN_EXPORT MLOperand mlGraphBuilderResample(MLGraphBuilder graphBuilder, MLOperand input, MLResampleOptions const * options);
 +WEBNN_EXPORT MLOperand mlGraphBuilderReshape(MLGraphBuilder graphBuilder, MLOperand input, int32_t const * newShape, uint32_t newShapeCount);
++WEBNN_EXPORT MLOperand mlGraphBuilderSigmoid(MLGraphBuilder graphBuilder, MLOperand input);
 +WEBNN_EXPORT MLOperand mlGraphBuilderSoftmax(MLGraphBuilder graphBuilder, MLOperand input);
 +WEBNN_EXPORT MLOperand mlGraphBuilderSub(MLGraphBuilder graphBuilder, MLOperand a, MLOperand b);
++WEBNN_EXPORT MLOperand mlGraphBuilderTanh(MLGraphBuilder graphBuilder, MLOperand input);
 +WEBNN_EXPORT MLOperand mlGraphBuilderTranspose(MLGraphBuilder graphBuilder, MLOperand input, MLTransposeOptions const * options);
 +WEBNN_EXPORT void mlGraphBuilderReference(MLGraphBuilder graphBuilder);
 +WEBNN_EXPORT void mlGraphBuilderRelease(MLGraphBuilder graphBuilder);
@@ -1239,26 +1409,17 @@ index 000000000..67dd9241f
 +WEBNN_EXPORT void mlNamedOperandsRelease(MLNamedOperands namedOperands);
 +
 +// Methods of NamedOutputs
-+WEBNN_EXPORT void mlNamedOutputsSet(MLNamedOutputs namedOutputs, char const * name, MLOutput const * output);
++WEBNN_EXPORT void mlNamedOutputsSet(MLNamedOutputs namedOutputs, char const * name, MLArrayBufferView const * resource);
 +WEBNN_EXPORT void mlNamedOutputsReference(MLNamedOutputs namedOutputs);
 +WEBNN_EXPORT void mlNamedOutputsRelease(MLNamedOutputs namedOutputs);
-+
-+// Methods of NamedResults
-+WEBNN_EXPORT MLResult mlNamedResultsGet(MLNamedResults namedResults, char const * name);
-+WEBNN_EXPORT void mlNamedResultsReference(MLNamedResults namedResults);
-+WEBNN_EXPORT void mlNamedResultsRelease(MLNamedResults namedResults);
 +
 +// Methods of Operand
 +WEBNN_EXPORT void mlOperandReference(MLOperand operand);
 +WEBNN_EXPORT void mlOperandRelease(MLOperand operand);
 +
-+// Methods of Result
-+WEBNN_EXPORT const void* mlResultBuffer(MLResult result);
-+WEBNN_EXPORT uint32_t mlResultBufferSize(MLResult result);
-+WEBNN_EXPORT const int32_t* mlResultDimensions(MLResult result);
-+WEBNN_EXPORT uint32_t mlResultDimensionsSize(MLResult result);
-+WEBNN_EXPORT void mlResultReference(MLResult result);
-+WEBNN_EXPORT void mlResultRelease(MLResult result);
++// Methods of Operator
++WEBNN_EXPORT void mlOperatorReference(MLOperator mlOperator);
++WEBNN_EXPORT void mlOperatorRelease(MLOperator mlOperator);
 +
 +#endif  // !defined(WEBNN_SKIP_DECLARATIONS)
 +
@@ -1269,10 +1430,10 @@ index 000000000..67dd9241f
 +#endif // WEBNN_H_
 diff --git a/system/include/webnn/webnn_cpp.h b/system/include/webnn/webnn_cpp.h
 new file mode 100644
-index 000000000..254bbe037
+index 000000000..ce4d8108e
 --- /dev/null
 +++ b/system/include/webnn/webnn_cpp.h
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,436 @@
 +#ifndef WEBNN_CPP_H_
 +#define WEBNN_CPP_H_
 +
@@ -1287,18 +1448,17 @@ index 000000000..254bbe037
 +        SameLower = 0x00000002,
 +    };
 +
-+    enum class BuildGraphStatus : uint32_t {
++    enum class ComputeGraphStatus : uint32_t {
 +        Success = 0x00000000,
 +        Error = 0x00000001,
 +        ContextLost = 0x00000002,
 +        Unknown = 0x00000003,
 +    };
 +
-+    enum class ComputeGraphStatus : uint32_t {
-+        Success = 0x00000000,
-+        Error = 0x00000001,
-+        ContextLost = 0x00000002,
-+        Unknown = 0x00000003,
++    enum class DevicePreference : uint32_t {
++        Default = 0x00000000,
++        Gpu = 0x00000001,
++        Cpu = 0x00000002,
 +    };
 +
 +    enum class ErrorFilter : uint32_t {
@@ -1322,14 +1482,14 @@ index 000000000..254bbe037
 +        Ihwo = 0x00000003,
 +    };
 +
-+    enum class FusedActivation : uint32_t {
-+        None = 0x00000000,
-+        Relu = 0x00000001,
-+    };
-+
 +    enum class InputOperandLayout : uint32_t {
 +        Nchw = 0x00000000,
 +        Nhwc = 0x00000001,
++    };
++
++    enum class InterpolationMode : uint32_t {
++        NearestNeighbor = 0x00000000,
++        Linear = 0x00000001,
 +    };
 +
 +    enum class OperandType : uint32_t {
@@ -1339,6 +1499,13 @@ index 000000000..254bbe037
 +        Uint32 = 0x00000003,
 +        Int8 = 0x00000004,
 +        Uint8 = 0x00000005,
++    };
++
++    enum class PaddingMode : uint32_t {
++        Constant = 0x00000000,
++        Edge = 0x00000001,
++        Reflection = 0x00000002,
++        Symmetric = 0x00000003,
 +    };
 +
 +    enum class PowerPreference : uint32_t {
@@ -1351,8 +1518,6 @@ index 000000000..254bbe037
 +
 +
 +    using Proc = WebnnProc;
-+    using BuildGraphCallback = MLBuildGraphCallback;
-+    using ComputeGraphCallback = MLComputeGraphCallback;
 +    using ErrorCallback = MLErrorCallback;
 +
 +    class Context;
@@ -1361,21 +1526,24 @@ index 000000000..254bbe037
 +    class NamedInputs;
 +    class NamedOperands;
 +    class NamedOutputs;
-+    class NamedResults;
 +    class Operand;
-+    class Result;
++    class Operator;
 +
++    struct ArrayBufferView;
 +    struct BatchNormOptions;
 +    struct ClampOptions;
 +    struct ContextOptions;
 +    struct Conv2dOptions;
 +    struct GemmOptions;
-+    struct Input;
++    struct InstanceNormOptions;
 +    struct LeakyReluOptions;
 +    struct OperandDescriptor;
-+    struct Output;
++    struct PadOptions;
 +    struct Pool2dOptions;
++    struct ReduceMeanOptions;
++    struct ResampleOptions;
 +    struct TransposeOptions;
++    struct Input;
 +
 +    template<typename Derived, typename CType>
 +    class ObjectBase {
@@ -1474,8 +1642,7 @@ index 000000000..254bbe037
 +        using ObjectBase::ObjectBase;
 +        using ObjectBase::operator=;
 +
-+        void Compute(NamedInputs const& inputs, ComputeGraphCallback callback, void * userdata, NamedOutputs const& outputs) const;
-+        ComputeGraphStatus ComputeSync(NamedInputs const& inputs, NamedOutputs const& outputs) const;
++        ComputeGraphStatus Compute(NamedInputs const& inputs, NamedOutputs const& outputs) const;
 +
 +      private:
 +        friend ObjectBase<Graph, MLGraph>;
@@ -1491,22 +1658,28 @@ index 000000000..254bbe037
 +        Operand Add(Operand const& a, Operand const& b) const;
 +        Operand AveragePool2d(Operand const& input, Pool2dOptions const * options = nullptr) const;
 +        Operand BatchNorm(Operand const& input, Operand const& mean, Operand const& variance, BatchNormOptions const * options = nullptr) const;
-+        void Build(NamedOperands const& namedOperands, BuildGraphCallback callback, void * userdata) const;
-+        Graph BuildSync(NamedOperands const& namedOperands) const;
++        Graph Build(NamedOperands const& namedOperands) const;
 +        Operand Clamp(Operand const& input, ClampOptions const * options = nullptr) const;
 +        Operand Concat(uint32_t inputsCount, Operand const * inputs, uint32_t axis) const;
-+        Operand Constant(OperandDescriptor const * desc, void const * value, size_t size) const;
++        Operand Constant(OperandDescriptor const * desc, ArrayBufferView const * value) const;
 +        Operand Conv2d(Operand const& input, Operand const& filter, Conv2dOptions const * options = nullptr) const;
++        Operand Div(Operand const& a, Operand const& b) const;
 +        Operand Gemm(Operand const& a, Operand const& b, GemmOptions const * options = nullptr) const;
 +        Operand Input(char const * name, OperandDescriptor const * desc) const;
++        Operand InstanceNorm(Operand const& input, InstanceNormOptions const * options = nullptr) const;
 +        Operand LeakyRelu(Operand const& input, LeakyReluOptions const * options = nullptr) const;
 +        Operand Matmul(Operand const& a, Operand const& b) const;
 +        Operand MaxPool2d(Operand const& input, Pool2dOptions const * options = nullptr) const;
 +        Operand Mul(Operand const& a, Operand const& b) const;
++        Operand Pad(Operand const& input, Operand const& padding, PadOptions const * options = nullptr) const;
++        Operand ReduceMean(Operand const& input, ReduceMeanOptions const * options = nullptr) const;
 +        Operand Relu(Operand const& input) const;
++        Operand Resample(Operand const& input, ResampleOptions const * options = nullptr) const;
 +        Operand Reshape(Operand const& input, int32_t const * newShape, uint32_t newShapeCount) const;
++        Operand Sigmoid(Operand const& input) const;
 +        Operand Softmax(Operand const& input) const;
 +        Operand Sub(Operand const& a, Operand const& b) const;
++        Operand Tanh(Operand const& input) const;
 +        Operand Transpose(Operand const& input, TransposeOptions const * options = nullptr) const;
 +
 +      private:
@@ -1546,25 +1719,12 @@ index 000000000..254bbe037
 +        using ObjectBase::ObjectBase;
 +        using ObjectBase::operator=;
 +
-+        void Set(char const * name, Output const * output) const;
++        void Set(char const * name, ArrayBufferView const * resource) const;
 +
 +      private:
 +        friend ObjectBase<NamedOutputs, MLNamedOutputs>;
 +        static void WebnnReference(MLNamedOutputs handle);
 +        static void WebnnRelease(MLNamedOutputs handle);
-+    };
-+
-+    class NamedResults : public ObjectBase<NamedResults, MLNamedResults> {
-+      public:
-+        using ObjectBase::ObjectBase;
-+        using ObjectBase::operator=;
-+
-+        Result Get(char const * name) const;
-+
-+      private:
-+        friend ObjectBase<NamedResults, MLNamedResults>;
-+        static void WebnnReference(MLNamedResults handle);
-+        static void WebnnRelease(MLNamedResults handle);
 +    };
 +
 +    class Operand : public ObjectBase<Operand, MLOperand> {
@@ -1579,20 +1739,16 @@ index 000000000..254bbe037
 +        static void WebnnRelease(MLOperand handle);
 +    };
 +
-+    class Result : public ObjectBase<Result, MLResult> {
++    class Operator : public ObjectBase<Operator, MLOperator> {
 +      public:
 +        using ObjectBase::ObjectBase;
 +        using ObjectBase::operator=;
 +
-+        const void* Buffer() const;
-+        uint32_t BufferSize() const;
-+        const int32_t* Dimensions() const;
-+        uint32_t DimensionsSize() const;
 +
 +      private:
-+        friend ObjectBase<Result, MLResult>;
-+        static void WebnnReference(MLResult handle);
-+        static void WebnnRelease(MLResult handle);
++        friend ObjectBase<Operator, MLOperator>;
++        static void WebnnReference(MLOperator handle);
++        static void WebnnRelease(MLOperator handle);
 +    };
 +
 +
@@ -1601,12 +1757,17 @@ index 000000000..254bbe037
 +        // SType sType = SType::Invalid;
 +    };
 +
++    struct ArrayBufferView {
++        void * buffer;
++        size_t byteLength;
++        size_t byteOffset = 0;
++    };
++
 +    struct BatchNormOptions {
 +        Operand scale;
 +        Operand bias;
 +        uint32_t axis = 1;
 +        float epsilon = 1e-05;
-+        FusedActivation activation = FusedActivation::None;
 +    };
 +
 +    struct ClampOptions {
@@ -1615,6 +1776,7 @@ index 000000000..254bbe037
 +    };
 +
 +    struct ContextOptions {
++        DevicePreference devicePreference = DevicePreference::Default;
 +        PowerPreference powerPreference = PowerPreference::Default;
 +    };
 +
@@ -1629,8 +1791,6 @@ index 000000000..254bbe037
 +        int32_t groups = 1;
 +        InputOperandLayout inputLayout = InputOperandLayout::Nchw;
 +        FilterOperandLayout filterLayout = FilterOperandLayout::Oihw;
-+        Operand bias;
-+        FusedActivation activation = FusedActivation::None;
 +    };
 +
 +    struct GemmOptions {
@@ -1641,11 +1801,11 @@ index 000000000..254bbe037
 +        bool bTranspose = false;
 +    };
 +
-+    struct Input {
-+        void const * buffer;
-+        size_t size;
-+        int32_t const * dimensions = nullptr;
-+        uint32_t dimensionsCount = 0;
++    struct InstanceNormOptions {
++        Operand scale;
++        Operand bias;
++        float epsilon = 1e-05;
++        InputOperandLayout layout = InputOperandLayout::Nchw;
 +    };
 +
 +    struct LeakyReluOptions {
@@ -1658,11 +1818,9 @@ index 000000000..254bbe037
 +        uint32_t dimensionsCount = 0;
 +    };
 +
-+    struct Output {
-+        void * buffer = nullptr;
-+        size_t size;
-+        int32_t const * dimensions = nullptr;
-+        uint32_t dimensionsCount = 0;
++    struct PadOptions {
++        PaddingMode mode = PaddingMode::Constant;
++        float value = 0;
 +    };
 +
 +    struct Pool2dOptions {
@@ -1678,9 +1836,29 @@ index 000000000..254bbe037
 +        InputOperandLayout layout = InputOperandLayout::Nchw;
 +    };
 +
++    struct ReduceMeanOptions {
++        uint32_t axesCount = 0;
++        int32_t const * axes = nullptr;
++        bool keepDimensions = false;
++    };
++
++    struct ResampleOptions {
++        InterpolationMode mode = InterpolationMode::NearestNeighbor;
++        uint32_t scalesCount = 0;
++        float const * scales = nullptr;
++        uint32_t sizesCount = 0;
++        int32_t const * sizes = nullptr;
++    };
++
 +    struct TransposeOptions {
 +        uint32_t permutationCount = 0;
 +        int32_t const * permutation = nullptr;
++    };
++
++    struct Input {
++        ArrayBufferView resource;
++        int32_t const * dimensions = nullptr;
++        uint32_t dimensionsCount = 0;
 +    };
 +
 +
@@ -1694,10 +1872,10 @@ index 000000000..254bbe037
 +#endif // WEBNN_CPP_H_
 diff --git a/system/lib/webnn/webnn_cpp.cpp b/system/lib/webnn/webnn_cpp.cpp
 new file mode 100644
-index 000000000..7e1634446
+index 000000000..b228e13c8
 --- /dev/null
 +++ b/system/lib/webnn/webnn_cpp.cpp
-@@ -0,0 +1,553 @@
+@@ -0,0 +1,592 @@
 +#include "webnn/webnn_cpp.h"
 +
 +namespace ml {
@@ -1711,16 +1889,6 @@ index 000000000..7e1634446
 +    static_assert(static_cast<uint32_t>(AutoPad::SameUpper) == MLAutoPad_SameUpper, "value mismatch for AutoPad::SameUpper");
 +    static_assert(static_cast<uint32_t>(AutoPad::SameLower) == MLAutoPad_SameLower, "value mismatch for AutoPad::SameLower");
 +
-+    // BuildGraphStatus
-+
-+    static_assert(sizeof(BuildGraphStatus) == sizeof(MLBuildGraphStatus), "sizeof mismatch for BuildGraphStatus");
-+    static_assert(alignof(BuildGraphStatus) == alignof(MLBuildGraphStatus), "alignof mismatch for BuildGraphStatus");
-+
-+    static_assert(static_cast<uint32_t>(BuildGraphStatus::Success) == MLBuildGraphStatus_Success, "value mismatch for BuildGraphStatus::Success");
-+    static_assert(static_cast<uint32_t>(BuildGraphStatus::Error) == MLBuildGraphStatus_Error, "value mismatch for BuildGraphStatus::Error");
-+    static_assert(static_cast<uint32_t>(BuildGraphStatus::ContextLost) == MLBuildGraphStatus_ContextLost, "value mismatch for BuildGraphStatus::ContextLost");
-+    static_assert(static_cast<uint32_t>(BuildGraphStatus::Unknown) == MLBuildGraphStatus_Unknown, "value mismatch for BuildGraphStatus::Unknown");
-+
 +    // ComputeGraphStatus
 +
 +    static_assert(sizeof(ComputeGraphStatus) == sizeof(MLComputeGraphStatus), "sizeof mismatch for ComputeGraphStatus");
@@ -1730,6 +1898,15 @@ index 000000000..7e1634446
 +    static_assert(static_cast<uint32_t>(ComputeGraphStatus::Error) == MLComputeGraphStatus_Error, "value mismatch for ComputeGraphStatus::Error");
 +    static_assert(static_cast<uint32_t>(ComputeGraphStatus::ContextLost) == MLComputeGraphStatus_ContextLost, "value mismatch for ComputeGraphStatus::ContextLost");
 +    static_assert(static_cast<uint32_t>(ComputeGraphStatus::Unknown) == MLComputeGraphStatus_Unknown, "value mismatch for ComputeGraphStatus::Unknown");
++
++    // DevicePreference
++
++    static_assert(sizeof(DevicePreference) == sizeof(MLDevicePreference), "sizeof mismatch for DevicePreference");
++    static_assert(alignof(DevicePreference) == alignof(MLDevicePreference), "alignof mismatch for DevicePreference");
++
++    static_assert(static_cast<uint32_t>(DevicePreference::Default) == MLDevicePreference_Default, "value mismatch for DevicePreference::Default");
++    static_assert(static_cast<uint32_t>(DevicePreference::Gpu) == MLDevicePreference_Gpu, "value mismatch for DevicePreference::Gpu");
++    static_assert(static_cast<uint32_t>(DevicePreference::Cpu) == MLDevicePreference_Cpu, "value mismatch for DevicePreference::Cpu");
 +
 +    // ErrorFilter
 +
@@ -1761,14 +1938,6 @@ index 000000000..7e1634446
 +    static_assert(static_cast<uint32_t>(FilterOperandLayout::Ohwi) == MLFilterOperandLayout_Ohwi, "value mismatch for FilterOperandLayout::Ohwi");
 +    static_assert(static_cast<uint32_t>(FilterOperandLayout::Ihwo) == MLFilterOperandLayout_Ihwo, "value mismatch for FilterOperandLayout::Ihwo");
 +
-+    // FusedActivation
-+
-+    static_assert(sizeof(FusedActivation) == sizeof(MLFusedActivation), "sizeof mismatch for FusedActivation");
-+    static_assert(alignof(FusedActivation) == alignof(MLFusedActivation), "alignof mismatch for FusedActivation");
-+
-+    static_assert(static_cast<uint32_t>(FusedActivation::None) == MLFusedActivation_None, "value mismatch for FusedActivation::None");
-+    static_assert(static_cast<uint32_t>(FusedActivation::Relu) == MLFusedActivation_Relu, "value mismatch for FusedActivation::Relu");
-+
 +    // InputOperandLayout
 +
 +    static_assert(sizeof(InputOperandLayout) == sizeof(MLInputOperandLayout), "sizeof mismatch for InputOperandLayout");
@@ -1776,6 +1945,14 @@ index 000000000..7e1634446
 +
 +    static_assert(static_cast<uint32_t>(InputOperandLayout::Nchw) == MLInputOperandLayout_Nchw, "value mismatch for InputOperandLayout::Nchw");
 +    static_assert(static_cast<uint32_t>(InputOperandLayout::Nhwc) == MLInputOperandLayout_Nhwc, "value mismatch for InputOperandLayout::Nhwc");
++
++    // InterpolationMode
++
++    static_assert(sizeof(InterpolationMode) == sizeof(MLInterpolationMode), "sizeof mismatch for InterpolationMode");
++    static_assert(alignof(InterpolationMode) == alignof(MLInterpolationMode), "alignof mismatch for InterpolationMode");
++
++    static_assert(static_cast<uint32_t>(InterpolationMode::NearestNeighbor) == MLInterpolationMode_NearestNeighbor, "value mismatch for InterpolationMode::NearestNeighbor");
++    static_assert(static_cast<uint32_t>(InterpolationMode::Linear) == MLInterpolationMode_Linear, "value mismatch for InterpolationMode::Linear");
 +
 +    // OperandType
 +
@@ -1789,6 +1966,16 @@ index 000000000..7e1634446
 +    static_assert(static_cast<uint32_t>(OperandType::Int8) == MLOperandType_Int8, "value mismatch for OperandType::Int8");
 +    static_assert(static_cast<uint32_t>(OperandType::Uint8) == MLOperandType_Uint8, "value mismatch for OperandType::Uint8");
 +
++    // PaddingMode
++
++    static_assert(sizeof(PaddingMode) == sizeof(MLPaddingMode), "sizeof mismatch for PaddingMode");
++    static_assert(alignof(PaddingMode) == alignof(MLPaddingMode), "alignof mismatch for PaddingMode");
++
++    static_assert(static_cast<uint32_t>(PaddingMode::Constant) == MLPaddingMode_Constant, "value mismatch for PaddingMode::Constant");
++    static_assert(static_cast<uint32_t>(PaddingMode::Edge) == MLPaddingMode_Edge, "value mismatch for PaddingMode::Edge");
++    static_assert(static_cast<uint32_t>(PaddingMode::Reflection) == MLPaddingMode_Reflection, "value mismatch for PaddingMode::Reflection");
++    static_assert(static_cast<uint32_t>(PaddingMode::Symmetric) == MLPaddingMode_Symmetric, "value mismatch for PaddingMode::Symmetric");
++
 +    // PowerPreference
 +
 +    static_assert(sizeof(PowerPreference) == sizeof(MLPowerPreference), "sizeof mismatch for PowerPreference");
@@ -1800,6 +1987,18 @@ index 000000000..7e1634446
 +
 +    // ChainedStruct
 +
++
++    // ArrayBufferView
++
++    static_assert(sizeof(ArrayBufferView) == sizeof(MLArrayBufferView), "sizeof mismatch for ArrayBufferView");
++    static_assert(alignof(ArrayBufferView) == alignof(MLArrayBufferView), "alignof mismatch for ArrayBufferView");
++
++    static_assert(offsetof(ArrayBufferView, buffer) == offsetof(MLArrayBufferView, buffer),
++            "offsetof mismatch for ArrayBufferView::buffer");
++    static_assert(offsetof(ArrayBufferView, byteLength) == offsetof(MLArrayBufferView, byteLength),
++            "offsetof mismatch for ArrayBufferView::byteLength");
++    static_assert(offsetof(ArrayBufferView, byteOffset) == offsetof(MLArrayBufferView, byteOffset),
++            "offsetof mismatch for ArrayBufferView::byteOffset");
 +
 +    // BatchNormOptions
 +
@@ -1814,8 +2013,6 @@ index 000000000..7e1634446
 +            "offsetof mismatch for BatchNormOptions::axis");
 +    static_assert(offsetof(BatchNormOptions, epsilon) == offsetof(MLBatchNormOptions, epsilon),
 +            "offsetof mismatch for BatchNormOptions::epsilon");
-+    static_assert(offsetof(BatchNormOptions, activation) == offsetof(MLBatchNormOptions, activation),
-+            "offsetof mismatch for BatchNormOptions::activation");
 +
 +    // ClampOptions
 +
@@ -1832,6 +2029,8 @@ index 000000000..7e1634446
 +    static_assert(sizeof(ContextOptions) == sizeof(MLContextOptions), "sizeof mismatch for ContextOptions");
 +    static_assert(alignof(ContextOptions) == alignof(MLContextOptions), "alignof mismatch for ContextOptions");
 +
++    static_assert(offsetof(ContextOptions, devicePreference) == offsetof(MLContextOptions, devicePreference),
++            "offsetof mismatch for ContextOptions::devicePreference");
 +    static_assert(offsetof(ContextOptions, powerPreference) == offsetof(MLContextOptions, powerPreference),
 +            "offsetof mismatch for ContextOptions::powerPreference");
 +
@@ -1860,10 +2059,6 @@ index 000000000..7e1634446
 +            "offsetof mismatch for Conv2dOptions::inputLayout");
 +    static_assert(offsetof(Conv2dOptions, filterLayout) == offsetof(MLConv2dOptions, filterLayout),
 +            "offsetof mismatch for Conv2dOptions::filterLayout");
-+    static_assert(offsetof(Conv2dOptions, bias) == offsetof(MLConv2dOptions, bias),
-+            "offsetof mismatch for Conv2dOptions::bias");
-+    static_assert(offsetof(Conv2dOptions, activation) == offsetof(MLConv2dOptions, activation),
-+            "offsetof mismatch for Conv2dOptions::activation");
 +
 +    // GemmOptions
 +
@@ -1881,19 +2076,19 @@ index 000000000..7e1634446
 +    static_assert(offsetof(GemmOptions, bTranspose) == offsetof(MLGemmOptions, bTranspose),
 +            "offsetof mismatch for GemmOptions::bTranspose");
 +
-+    // Input
++    // InstanceNormOptions
 +
-+    static_assert(sizeof(Input) == sizeof(MLInput), "sizeof mismatch for Input");
-+    static_assert(alignof(Input) == alignof(MLInput), "alignof mismatch for Input");
++    static_assert(sizeof(InstanceNormOptions) == sizeof(MLInstanceNormOptions), "sizeof mismatch for InstanceNormOptions");
++    static_assert(alignof(InstanceNormOptions) == alignof(MLInstanceNormOptions), "alignof mismatch for InstanceNormOptions");
 +
-+    static_assert(offsetof(Input, buffer) == offsetof(MLInput, buffer),
-+            "offsetof mismatch for Input::buffer");
-+    static_assert(offsetof(Input, size) == offsetof(MLInput, size),
-+            "offsetof mismatch for Input::size");
-+    static_assert(offsetof(Input, dimensions) == offsetof(MLInput, dimensions),
-+            "offsetof mismatch for Input::dimensions");
-+    static_assert(offsetof(Input, dimensionsCount) == offsetof(MLInput, dimensionsCount),
-+            "offsetof mismatch for Input::dimensionsCount");
++    static_assert(offsetof(InstanceNormOptions, scale) == offsetof(MLInstanceNormOptions, scale),
++            "offsetof mismatch for InstanceNormOptions::scale");
++    static_assert(offsetof(InstanceNormOptions, bias) == offsetof(MLInstanceNormOptions, bias),
++            "offsetof mismatch for InstanceNormOptions::bias");
++    static_assert(offsetof(InstanceNormOptions, epsilon) == offsetof(MLInstanceNormOptions, epsilon),
++            "offsetof mismatch for InstanceNormOptions::epsilon");
++    static_assert(offsetof(InstanceNormOptions, layout) == offsetof(MLInstanceNormOptions, layout),
++            "offsetof mismatch for InstanceNormOptions::layout");
 +
 +    // LeakyReluOptions
 +
@@ -1915,19 +2110,15 @@ index 000000000..7e1634446
 +    static_assert(offsetof(OperandDescriptor, dimensionsCount) == offsetof(MLOperandDescriptor, dimensionsCount),
 +            "offsetof mismatch for OperandDescriptor::dimensionsCount");
 +
-+    // Output
++    // PadOptions
 +
-+    static_assert(sizeof(Output) == sizeof(MLOutput), "sizeof mismatch for Output");
-+    static_assert(alignof(Output) == alignof(MLOutput), "alignof mismatch for Output");
++    static_assert(sizeof(PadOptions) == sizeof(MLPadOptions), "sizeof mismatch for PadOptions");
++    static_assert(alignof(PadOptions) == alignof(MLPadOptions), "alignof mismatch for PadOptions");
 +
-+    static_assert(offsetof(Output, buffer) == offsetof(MLOutput, buffer),
-+            "offsetof mismatch for Output::buffer");
-+    static_assert(offsetof(Output, size) == offsetof(MLOutput, size),
-+            "offsetof mismatch for Output::size");
-+    static_assert(offsetof(Output, dimensions) == offsetof(MLOutput, dimensions),
-+            "offsetof mismatch for Output::dimensions");
-+    static_assert(offsetof(Output, dimensionsCount) == offsetof(MLOutput, dimensionsCount),
-+            "offsetof mismatch for Output::dimensionsCount");
++    static_assert(offsetof(PadOptions, mode) == offsetof(MLPadOptions, mode),
++            "offsetof mismatch for PadOptions::mode");
++    static_assert(offsetof(PadOptions, value) == offsetof(MLPadOptions, value),
++            "offsetof mismatch for PadOptions::value");
 +
 +    // Pool2dOptions
 +
@@ -1955,6 +2146,34 @@ index 000000000..7e1634446
 +    static_assert(offsetof(Pool2dOptions, layout) == offsetof(MLPool2dOptions, layout),
 +            "offsetof mismatch for Pool2dOptions::layout");
 +
++    // ReduceMeanOptions
++
++    static_assert(sizeof(ReduceMeanOptions) == sizeof(MLReduceMeanOptions), "sizeof mismatch for ReduceMeanOptions");
++    static_assert(alignof(ReduceMeanOptions) == alignof(MLReduceMeanOptions), "alignof mismatch for ReduceMeanOptions");
++
++    static_assert(offsetof(ReduceMeanOptions, axesCount) == offsetof(MLReduceMeanOptions, axesCount),
++            "offsetof mismatch for ReduceMeanOptions::axesCount");
++    static_assert(offsetof(ReduceMeanOptions, axes) == offsetof(MLReduceMeanOptions, axes),
++            "offsetof mismatch for ReduceMeanOptions::axes");
++    static_assert(offsetof(ReduceMeanOptions, keepDimensions) == offsetof(MLReduceMeanOptions, keepDimensions),
++            "offsetof mismatch for ReduceMeanOptions::keepDimensions");
++
++    // ResampleOptions
++
++    static_assert(sizeof(ResampleOptions) == sizeof(MLResampleOptions), "sizeof mismatch for ResampleOptions");
++    static_assert(alignof(ResampleOptions) == alignof(MLResampleOptions), "alignof mismatch for ResampleOptions");
++
++    static_assert(offsetof(ResampleOptions, mode) == offsetof(MLResampleOptions, mode),
++            "offsetof mismatch for ResampleOptions::mode");
++    static_assert(offsetof(ResampleOptions, scalesCount) == offsetof(MLResampleOptions, scalesCount),
++            "offsetof mismatch for ResampleOptions::scalesCount");
++    static_assert(offsetof(ResampleOptions, scales) == offsetof(MLResampleOptions, scales),
++            "offsetof mismatch for ResampleOptions::scales");
++    static_assert(offsetof(ResampleOptions, sizesCount) == offsetof(MLResampleOptions, sizesCount),
++            "offsetof mismatch for ResampleOptions::sizesCount");
++    static_assert(offsetof(ResampleOptions, sizes) == offsetof(MLResampleOptions, sizes),
++            "offsetof mismatch for ResampleOptions::sizes");
++
 +    // TransposeOptions
 +
 +    static_assert(sizeof(TransposeOptions) == sizeof(MLTransposeOptions), "sizeof mismatch for TransposeOptions");
@@ -1964,6 +2183,18 @@ index 000000000..7e1634446
 +            "offsetof mismatch for TransposeOptions::permutationCount");
 +    static_assert(offsetof(TransposeOptions, permutation) == offsetof(MLTransposeOptions, permutation),
 +            "offsetof mismatch for TransposeOptions::permutation");
++
++    // Input
++
++    static_assert(sizeof(Input) == sizeof(MLInput), "sizeof mismatch for Input");
++    static_assert(alignof(Input) == alignof(MLInput), "alignof mismatch for Input");
++
++    static_assert(offsetof(Input, resource) == offsetof(MLInput, resource),
++            "offsetof mismatch for Input::resource");
++    static_assert(offsetof(Input, dimensions) == offsetof(MLInput, dimensions),
++            "offsetof mismatch for Input::dimensions");
++    static_assert(offsetof(Input, dimensionsCount) == offsetof(MLInput, dimensionsCount),
++            "offsetof mismatch for Input::dimensionsCount");
 +
 +    // Context
 +
@@ -1996,11 +2227,8 @@ index 000000000..7e1634446
 +    static_assert(sizeof(Graph) == sizeof(MLGraph), "sizeof mismatch for Graph");
 +    static_assert(alignof(Graph) == alignof(MLGraph), "alignof mismatch for Graph");
 +
-+    void Graph::Compute(NamedInputs const& inputs, ComputeGraphCallback callback, void * userdata, NamedOutputs const& outputs) const {
-+        mlGraphCompute(GetHandle(), inputs.GetHandle(), callback, reinterpret_cast<void * >(userdata), outputs.GetHandle());
-+    }
-+    ComputeGraphStatus Graph::ComputeSync(NamedInputs const& inputs, NamedOutputs const& outputs) const {
-+        auto result = mlGraphComputeSync(GetHandle(), inputs.GetHandle(), outputs.GetHandle());
++    ComputeGraphStatus Graph::Compute(NamedInputs const& inputs, NamedOutputs const& outputs) const {
++        auto result = mlGraphCompute(GetHandle(), inputs.GetHandle(), outputs.GetHandle());
 +        return static_cast<ComputeGraphStatus>(result);
 +    }
 +    void Graph::WebnnReference(MLGraph handle) {
@@ -2031,11 +2259,8 @@ index 000000000..7e1634446
 +        auto result = mlGraphBuilderBatchNorm(GetHandle(), input.GetHandle(), mean.GetHandle(), variance.GetHandle(), reinterpret_cast<MLBatchNormOptions const * >(options));
 +        return Operand::Acquire(result);
 +    }
-+    void GraphBuilder::Build(NamedOperands const& namedOperands, BuildGraphCallback callback, void * userdata) const {
-+        mlGraphBuilderBuild(GetHandle(), namedOperands.GetHandle(), callback, reinterpret_cast<void * >(userdata));
-+    }
-+    Graph GraphBuilder::BuildSync(NamedOperands const& namedOperands) const {
-+        auto result = mlGraphBuilderBuildSync(GetHandle(), namedOperands.GetHandle());
++    Graph GraphBuilder::Build(NamedOperands const& namedOperands) const {
++        auto result = mlGraphBuilderBuild(GetHandle(), namedOperands.GetHandle());
 +        return Graph::Acquire(result);
 +    }
 +    Operand GraphBuilder::Clamp(Operand const& input, ClampOptions const * options) const {
@@ -2046,12 +2271,16 @@ index 000000000..7e1634446
 +        auto result = mlGraphBuilderConcat(GetHandle(), inputsCount, reinterpret_cast<MLOperand const * >(inputs), axis);
 +        return Operand::Acquire(result);
 +    }
-+    Operand GraphBuilder::Constant(OperandDescriptor const * desc, void const * value, size_t size) const {
-+        auto result = mlGraphBuilderConstant(GetHandle(), reinterpret_cast<MLOperandDescriptor const * >(desc), reinterpret_cast<void const * >(value), size);
++    Operand GraphBuilder::Constant(OperandDescriptor const * desc, ArrayBufferView const * value) const {
++        auto result = mlGraphBuilderConstant(GetHandle(), reinterpret_cast<MLOperandDescriptor const * >(desc), reinterpret_cast<MLArrayBufferView const * >(value));
 +        return Operand::Acquire(result);
 +    }
 +    Operand GraphBuilder::Conv2d(Operand const& input, Operand const& filter, Conv2dOptions const * options) const {
 +        auto result = mlGraphBuilderConv2d(GetHandle(), input.GetHandle(), filter.GetHandle(), reinterpret_cast<MLConv2dOptions const * >(options));
++        return Operand::Acquire(result);
++    }
++    Operand GraphBuilder::Div(Operand const& a, Operand const& b) const {
++        auto result = mlGraphBuilderDiv(GetHandle(), a.GetHandle(), b.GetHandle());
 +        return Operand::Acquire(result);
 +    }
 +    Operand GraphBuilder::Gemm(Operand const& a, Operand const& b, GemmOptions const * options) const {
@@ -2060,6 +2289,10 @@ index 000000000..7e1634446
 +    }
 +    Operand GraphBuilder::Input(char const * name, OperandDescriptor const * desc) const {
 +        auto result = mlGraphBuilderInput(GetHandle(), reinterpret_cast<char const * >(name), reinterpret_cast<MLOperandDescriptor const * >(desc));
++        return Operand::Acquire(result);
++    }
++    Operand GraphBuilder::InstanceNorm(Operand const& input, InstanceNormOptions const * options) const {
++        auto result = mlGraphBuilderInstanceNorm(GetHandle(), input.GetHandle(), reinterpret_cast<MLInstanceNormOptions const * >(options));
 +        return Operand::Acquire(result);
 +    }
 +    Operand GraphBuilder::LeakyRelu(Operand const& input, LeakyReluOptions const * options) const {
@@ -2078,12 +2311,28 @@ index 000000000..7e1634446
 +        auto result = mlGraphBuilderMul(GetHandle(), a.GetHandle(), b.GetHandle());
 +        return Operand::Acquire(result);
 +    }
++    Operand GraphBuilder::Pad(Operand const& input, Operand const& padding, PadOptions const * options) const {
++        auto result = mlGraphBuilderPad(GetHandle(), input.GetHandle(), padding.GetHandle(), reinterpret_cast<MLPadOptions const * >(options));
++        return Operand::Acquire(result);
++    }
++    Operand GraphBuilder::ReduceMean(Operand const& input, ReduceMeanOptions const * options) const {
++        auto result = mlGraphBuilderReduceMean(GetHandle(), input.GetHandle(), reinterpret_cast<MLReduceMeanOptions const * >(options));
++        return Operand::Acquire(result);
++    }
 +    Operand GraphBuilder::Relu(Operand const& input) const {
 +        auto result = mlGraphBuilderRelu(GetHandle(), input.GetHandle());
 +        return Operand::Acquire(result);
 +    }
++    Operand GraphBuilder::Resample(Operand const& input, ResampleOptions const * options) const {
++        auto result = mlGraphBuilderResample(GetHandle(), input.GetHandle(), reinterpret_cast<MLResampleOptions const * >(options));
++        return Operand::Acquire(result);
++    }
 +    Operand GraphBuilder::Reshape(Operand const& input, int32_t const * newShape, uint32_t newShapeCount) const {
 +        auto result = mlGraphBuilderReshape(GetHandle(), input.GetHandle(), reinterpret_cast<int32_t const * >(newShape), newShapeCount);
++        return Operand::Acquire(result);
++    }
++    Operand GraphBuilder::Sigmoid(Operand const& input) const {
++        auto result = mlGraphBuilderSigmoid(GetHandle(), input.GetHandle());
 +        return Operand::Acquire(result);
 +    }
 +    Operand GraphBuilder::Softmax(Operand const& input) const {
@@ -2092,6 +2341,10 @@ index 000000000..7e1634446
 +    }
 +    Operand GraphBuilder::Sub(Operand const& a, Operand const& b) const {
 +        auto result = mlGraphBuilderSub(GetHandle(), a.GetHandle(), b.GetHandle());
++        return Operand::Acquire(result);
++    }
++    Operand GraphBuilder::Tanh(Operand const& input) const {
++        auto result = mlGraphBuilderTanh(GetHandle(), input.GetHandle());
 +        return Operand::Acquire(result);
 +    }
 +    Operand GraphBuilder::Transpose(Operand const& input, TransposeOptions const * options) const {
@@ -2152,8 +2405,8 @@ index 000000000..7e1634446
 +    static_assert(sizeof(NamedOutputs) == sizeof(MLNamedOutputs), "sizeof mismatch for NamedOutputs");
 +    static_assert(alignof(NamedOutputs) == alignof(MLNamedOutputs), "alignof mismatch for NamedOutputs");
 +
-+    void NamedOutputs::Set(char const * name, Output const * output) const {
-+        mlNamedOutputsSet(GetHandle(), reinterpret_cast<char const * >(name), reinterpret_cast<MLOutput const * >(output));
++    void NamedOutputs::Set(char const * name, ArrayBufferView const * resource) const {
++        mlNamedOutputsSet(GetHandle(), reinterpret_cast<char const * >(name), reinterpret_cast<MLArrayBufferView const * >(resource));
 +    }
 +    void NamedOutputs::WebnnReference(MLNamedOutputs handle) {
 +        if (handle != nullptr) {
@@ -2163,26 +2416,6 @@ index 000000000..7e1634446
 +    void NamedOutputs::WebnnRelease(MLNamedOutputs handle) {
 +        if (handle != nullptr) {
 +            mlNamedOutputsRelease(handle);
-+        }
-+    }
-+
-+    // NamedResults
-+
-+    static_assert(sizeof(NamedResults) == sizeof(MLNamedResults), "sizeof mismatch for NamedResults");
-+    static_assert(alignof(NamedResults) == alignof(MLNamedResults), "alignof mismatch for NamedResults");
-+
-+    Result NamedResults::Get(char const * name) const {
-+        auto result = mlNamedResultsGet(GetHandle(), reinterpret_cast<char const * >(name));
-+        return Result::Acquire(result);
-+    }
-+    void NamedResults::WebnnReference(MLNamedResults handle) {
-+        if (handle != nullptr) {
-+            mlNamedResultsReference(handle);
-+        }
-+    }
-+    void NamedResults::WebnnRelease(MLNamedResults handle) {
-+        if (handle != nullptr) {
-+            mlNamedResultsRelease(handle);
 +        }
 +    }
 +
@@ -2202,35 +2435,19 @@ index 000000000..7e1634446
 +        }
 +    }
 +
-+    // Result
++    // Operator
 +
-+    static_assert(sizeof(Result) == sizeof(MLResult), "sizeof mismatch for Result");
-+    static_assert(alignof(Result) == alignof(MLResult), "alignof mismatch for Result");
++    static_assert(sizeof(Operator) == sizeof(MLOperator), "sizeof mismatch for Operator");
++    static_assert(alignof(Operator) == alignof(MLOperator), "alignof mismatch for Operator");
 +
-+    const void* Result::Buffer() const {
-+        auto result = mlResultBuffer(GetHandle());
-+        return result;
-+    }
-+    uint32_t Result::BufferSize() const {
-+        auto result = mlResultBufferSize(GetHandle());
-+        return result;
-+    }
-+    const int32_t* Result::Dimensions() const {
-+        auto result = mlResultDimensions(GetHandle());
-+        return result;
-+    }
-+    uint32_t Result::DimensionsSize() const {
-+        auto result = mlResultDimensionsSize(GetHandle());
-+        return result;
-+    }
-+    void Result::WebnnReference(MLResult handle) {
++    void Operator::WebnnReference(MLOperator handle) {
 +        if (handle != nullptr) {
-+            mlResultReference(handle);
++            mlOperatorReference(handle);
 +        }
 +    }
-+    void Result::WebnnRelease(MLResult handle) {
++    void Operator::WebnnRelease(MLOperator handle) {
 +        if (handle != nullptr) {
-+            mlResultRelease(handle);
++            mlOperatorRelease(handle);
 +        }
 +    }
 +
