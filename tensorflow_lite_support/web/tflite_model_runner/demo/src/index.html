@@ -44,9 +44,15 @@
     </div>
     <div>
       Use WebNN delegate: <input type="checkbox" id="webnnDelegate" />
+      Device preference:
+      <select id="webnnDevice">
+        <option value="0">default</option>
+        <option value="1">gpu</option>
+        <option value="2">cpu</option>
+      </select>
     </div>
     <div>
-      <input type="button" onclick="start()" value="Predict" id="predict" disabled />
+      <input type="button" onclick="start()" value="Predict" id="predict" />
     </div>
   </div>
   <div class="content">
@@ -54,6 +60,7 @@
     <div class="result"></div>
   </div>
   <script src="./webnn-polyfill/webnn-polyfill.js"></script>
+  <script src="./tflite_model_runner_cc.js"></script>
   <script src="./script.js"></script>
 </body>
 </html>

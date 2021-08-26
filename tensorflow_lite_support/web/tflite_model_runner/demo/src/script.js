@@ -21,7 +21,8 @@ async function start() {
           offset, modelBytes.length, {
             numThreads: Math.min(
                 4, Math.max(1, (navigator.hardwareConcurrency || 1) / 2)),
-            enableWebNNDelegate: document.getElementById('webnnDelegate').checked
+            enableWebNNDelegate: document.getElementById('webnnDelegate').checked,
+            webNNDevicePreference: parseInt(document.getElementById('webnnDevice').value)
           });
   if (!modelRunnerResult.ok()) {
     throw new Error(
@@ -123,12 +124,6 @@ async function start() {
   }
 }
 
-if (!isNode()) {
-  loadScript('./tflite_model_runner_cc.js');
-} else {
-  loadScript('./tflite_model_runner_cc_st.js');
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 // Helper functions.
 
@@ -137,23 +132,6 @@ function getMedianValue(array) {
   const medianValue = array.length % 2 !== 0 ? array[Math.floor(array.length / 2)] :
       (array[array.length / 2 - 1] + array[array.length / 2]) / 2;
   return medianValue.toFixed(2);
-}
-
-function isNode() {
-  return (typeof process !== 'undefined') &&
-      (typeof process.versions !== 'undefined') &&
-      (typeof process.versions.node !== 'undefined');
-}
-
-function loadScript(url) {
-  var script = document.createElement('script');
-  script.type = 'text/javascript';
-  script.onload = function() {
-    document.getElementById('predict').disabled = false;
-  };
-
-  script.src = url;
-  document.getElementsByTagName('head')[0].appendChild(script);
 }
 
 let fromPixels2DContext;
