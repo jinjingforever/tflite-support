@@ -1,15 +1,14 @@
-MODEL_PATH = 'mobilenetv2.tflite';
-
 async function start() {
   //////////////////////////////////////////////////////////////////////////////
   // Create the model runner with the model.
 
+  let modelPath = document.getElementById('model').value + '.tflite';
   const startTs = Date.now();
 
   // Load WASM module and model.
   const [module, modelArrayBuffer] = await Promise.all([
     tflite_model_runner_ModuleFactory(),
-    (await fetch(MODEL_PATH)).arrayBuffer(),
+    (await fetch(modelPath)).arrayBuffer(),
   ]);
   const modelBytes = new Uint8Array(modelArrayBuffer);
   const offset = module._malloc(modelBytes.length);
@@ -31,7 +30,7 @@ async function start() {
   const modelRunner = modelRunnerResult.value();
   const loadFinishedMs = Date.now() - startTs;
   document.querySelector('.loading-stats').textContent =
-      `Loaded WASM module and TFLite model ${MODEL_PATH} in ${
+      `Loaded WASM module and TFLite model ${modelPath} in ${
           loadFinishedMs}ms`;
   document.querySelector('.content').classList.remove('hide');
 
