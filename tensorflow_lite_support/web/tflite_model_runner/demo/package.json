@@ -3,7 +3,8 @@
     "clang-format": "~1.2.4"
   },
   "dependencies": {
-    "electron": "^13.1.4"
+    "electron": "^15.0.0",
+    "webnn-node": "file:webnn-native/node"
   },
   "main": "main.js",
   "scripts": {
