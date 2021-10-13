@@ -14,6 +14,18 @@ async function start() {
   const offset = module._malloc(modelBytes.length);
   module.HEAPU8.set(modelBytes, offset);
 
+  // Set webnn-polyfill backend if needed
+  if (navigator.ml.createContext().tf !== undefined) {
+    const tf = navigator.ml.createContext().tf;
+    const devicePreference = parseInt(document.getElementById('webnnDevice').value);
+    if (devicePreference === 1) {
+      tf.setBackend('webgl');
+    } else {
+      tf.setBackend('wasm');
+    }
+    await tf.ready();
+  }
+
   // Create model runner.
   const modelRunnerResult =
       module.TFLiteWebModelRunner.CreateFromBufferAndOptions(
