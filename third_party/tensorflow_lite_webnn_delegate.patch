@@ -114,10 +114,10 @@ index 00000000000..1b25e9e87fa
 \ No newline at end of file
 diff --git a/tensorflow/lite/delegates/webnn/webnn_delegate.cc b/tensorflow/lite/delegates/webnn/webnn_delegate.cc
 new file mode 100644
-index 00000000000..2bc6db04707
+index 00000000000..a0b916275c7
 --- /dev/null
 +++ b/tensorflow/lite/delegates/webnn/webnn_delegate.cc
-@@ -0,0 +1,1828 @@
+@@ -0,0 +1,1815 @@
 +/* Copyright 2021 The TensorFlow Authors. All Rights Reserved.
 +
 +Licensed under the Apache License, Version 2.0 (the "License");
@@ -776,22 +776,9 @@ index 00000000000..2bc6db04707
 +  static ml::Operand BuildClamp(
 +      const ml::GraphBuilder& builder, const ml::Operand& input,
 +      float min_value, float max_value, std::vector<std::unique_ptr<char>>& constant_buffers) {
-+    std::unique_ptr<char> min_buffer(new char[sizeof(float)]);
-+    *reinterpret_cast<float*>(min_buffer.get()) = min_value;
-+    std::unique_ptr<char> max_buffer(new char[sizeof(float)]);
-+    *reinterpret_cast<float*>(max_buffer.get()) = max_value;
-+    std::vector<int32_t> dims = {};
-+    ml::OperandDescriptor desc = {
-+        ml::OperandType::Float32, dims.data(), static_cast<uint32_t>(dims.size())};
-+    ml::ArrayBufferView min_buffer_view = {min_buffer.get(), sizeof(float)};
-+    ml::Operand min_operand = builder.Constant(&desc, &min_buffer_view);
-+    ml::ArrayBufferView max_buffer_view = {max_buffer.get(), sizeof(float)};
-+    ml::Operand max_operand = builder.Constant(&desc, &max_buffer_view);
 +    ml::ClampOptions options;
-+    options.minValue = min_operand;
-+    options.maxValue = max_operand;
-+    constant_buffers.push_back(std::move(min_buffer));
-+    constant_buffers.push_back(std::move(max_buffer));
++    options.minValue = min_value;
++    options.maxValue = max_value;
 +    return builder.Clamp(input, &options);
 +  }
 +
@@ -2009,7 +1996,7 @@ index 00000000000..5b791c7777a
 +
 +#endif  // TENSORFLOW_LITE_DELEGATES_WEBNN_WEBNN_DELEGATE_H_
 diff --git a/tensorflow/lite/examples/label_image/CMakeLists.txt b/tensorflow/lite/examples/label_image/CMakeLists.txt
-index 188906e791f..014e9eff46c 100644
+index 188906e791f..d4388ea434d 100644
 --- a/tensorflow/lite/examples/label_image/CMakeLists.txt
 +++ b/tensorflow/lite/examples/label_image/CMakeLists.txt
 @@ -40,6 +40,18 @@ else()
@@ -2031,15 +2018,20 @@ index 188906e791f..014e9eff46c 100644
  if(CMAKE_SYSTEM_NAME MATCHES "Android")
    if(_TFLITE_ENABLE_NNAPI)
      list(APPEND TFLITE_LABEL_IMAGE_SRCS
-@@ -64,4 +76,6 @@ target_compile_options(label_image
- )
+@@ -65,3 +77,10 @@ target_compile_options(label_image
  target_link_libraries(label_image
    tensorflow-lite
-+  webnn_native
-+  webnn_proc
  )
++
++if(TFLITE_ENABLE_WEBNN)
++  target_link_libraries(label_image
++    webnn_native
++    webnn_proc
++  )
++endif()
+\ No newline at end of file
 diff --git a/tensorflow/lite/examples/label_image/label_image.cc b/tensorflow/lite/examples/label_image/label_image.cc
-index 15583426fe5..ab146fe1d13 100644
+index 15583426fe5..963d9d874f5 100644
 --- a/tensorflow/lite/examples/label_image/label_image.cc
 +++ b/tensorflow/lite/examples/label_image/label_image.cc
 @@ -136,6 +136,17 @@ class DelegateProviders {
@@ -2060,7 +2052,17 @@ index 15583426fe5..ab146fe1d13 100644
    }
  
    // Create a list of TfLite delegates based on what have been initialized (i.e.
-@@ -422,7 +433,9 @@ void display_usage() {
+@@ -223,6 +234,9 @@ void RunInference(Settings* settings,
+ 
+   tflite::ops::builtin::BuiltinOpResolver resolver;
+ 
++  static TfLiteRegistration reg = {nullptr, nullptr, nullptr, nullptr};
++  resolver.AddCustom("Convolution2DTransposeBias", &reg);
++
+   tflite::InterpreterBuilder(*model, resolver)(&interpreter);
+   if (!interpreter) {
+     LOG(ERROR) << "Failed to construct interpreter";
+@@ -422,7 +436,9 @@ void display_usage() {
        << "--threads, -t: number of threads\n"
        << "--verbose, -v: [0|1] print more information\n"
        << "--warmup_runs, -w: number of warmup runs\n"
@@ -2071,7 +2073,7 @@ index 15583426fe5..ab146fe1d13 100644
  }
  
  int Main(int argc, char** argv) {
-@@ -455,13 +468,15 @@ int Main(int argc, char** argv) {
+@@ -455,13 +471,15 @@ int Main(int argc, char** argv) {
          {"gl_backend", required_argument, nullptr, 'g'},
          {"hexagon_delegate", required_argument, nullptr, 'j'},
          {"xnnpack_delegate", required_argument, nullptr, 'x'},
@@ -2088,7 +2090,7 @@ index 15583426fe5..ab146fe1d13 100644
                      &option_index);
  
      /* Detect the end of the options. */
-@@ -529,6 +544,14 @@ int Main(int argc, char** argv) {
+@@ -529,6 +547,14 @@ int Main(int argc, char** argv) {
          s.xnnpack_delegate =
              strtol(optarg, nullptr, 10);  // NOLINT(runtime/deprecated_fn)
          break;
@@ -2149,9 +2151,64 @@ index 00000000000..e22a8557e68
 +      TfLiteWebNNDelegateCreate(&opts), TfLiteWebNNDelegateDelete);
 +}
 +}  // namespace tflite
+diff --git a/tensorflow/lite/tools/benchmark/CMakeLists.txt b/tensorflow/lite/tools/benchmark/CMakeLists.txt
+index 015f8f21f02..ef88d63ce2d 100644
+--- a/tensorflow/lite/tools/benchmark/CMakeLists.txt
++++ b/tensorflow/lite/tools/benchmark/CMakeLists.txt
+@@ -52,6 +52,18 @@ else()
+   set(TFLITE_BENCHMARK_CC_OPTIONS "-DTFLITE_WITHOUT_XNNPACK")
+ endif()  # TFLITE_ENABLE_XNNPACK
+ 
++if(TFLITE_ENABLE_WEBNN)
++  list(APPEND TFLITE_BENCHMARK_SRCS
++    ${TFLITE_SOURCE_DIR}/tools/delegates/webnn_delegate_provider.cc
++  )
++  list(APPEND TFLITE_BENCHMARK_SRCS "$ENV{WEBNN_NATIVE_DIR}/gen/src/webnn/webnn_cpp.cpp")
++  link_directories(
++    "$ENV{WEBNN_NATIVE_DIR}"
++  )
++else()
++  set(TFLITE_LABEL_IMAGE_CC_OPTIONS "-DTFLITE_WITHOUT_WEBNN")
++endif()  # TFLITE_ENABLE_WEBNN
++
+ if(CMAKE_SYSTEM_NAME MATCHES "Android")
+   if(_TFLITE_ENABLE_NNAPI)
+     list(APPEND TFLITE_BENCHMARK_SRCS
+@@ -81,3 +93,17 @@ target_compile_options(benchmark_model
+ target_link_libraries(benchmark_model
+     ${TFLITE_BENCHMARK_LIBS}
+ )
++
++if(TFLITE_ENABLE_WEBNN)
++  if(CMAKE_SYSTEM_NAME MATCHES "Windows")
++    target_link_libraries(benchmark_model
++      $ENV{WEBNN_NATIVE_DIR}/webnn_native.dll.lib
++      $ENV{WEBNN_NATIVE_DIR}/webnn_proc.dll.lib
++    )
++  else()
++    target_link_libraries(benchmark_model
++      webnn_native
++      webnn_proc
++    )
++  endif()
++endif()
+diff --git a/tensorflow/lite/tools/benchmark/benchmark_tflite_model.cc b/tensorflow/lite/tools/benchmark/benchmark_tflite_model.cc
+index 4b475d78553..5b25ee2adb4 100644
+--- a/tensorflow/lite/tools/benchmark/benchmark_tflite_model.cc
++++ b/tensorflow/lite/tools/benchmark/benchmark_tflite_model.cc
+@@ -811,6 +811,9 @@ std::unique_ptr<tflite::OpResolver> BenchmarkTfLiteModel::GetOpResolver()
+   } else {
+     resolver = new tflite::ops::builtin::BuiltinOpResolver();
+   }
++  static TfLiteRegistration reg = {nullptr, nullptr, nullptr, nullptr};
++  resolver->AddCustom("Convolution2DTransposeBias", &reg);
++
+   RegisterSelectedOps(resolver);
+   return std::unique_ptr<tflite::OpResolver>(resolver);
+ }
 diff --git a/tensorflow/lite/tools/delegates/webnn_delegate_provider.cc b/tensorflow/lite/tools/delegates/webnn_delegate_provider.cc
 new file mode 100644
-index 00000000000..1e43bae302e
+index 00000000000..da38b1f3a62
 --- /dev/null
 +++ b/tensorflow/lite/tools/delegates/webnn_delegate_provider.cc
 @@ -0,0 +1,63 @@
@@ -2198,7 +2255,7 @@ index 00000000000..1e43bae302e
 +    ToolParams* params) const {
 +  std::vector<Flag> flags = {
 +      CreateFlag<bool>("use_webnn", params, "use WebNN"),
-+      CreateFlag<int>("webnn_device", params, "WebNN device")};
++      CreateFlag<int>("webnn_device", params, "WebNN device (0:default, 1:gpu, 2:cpu)")};
 +  return flags;
 +}
 +
