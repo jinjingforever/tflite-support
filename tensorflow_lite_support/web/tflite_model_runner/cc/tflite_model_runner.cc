@@ -87,6 +87,9 @@ TfLiteStatus TFLiteWebModelRunner::InitFromBuffer(
   model_ =
       tflite::FlatBufferModel::BuildFromBuffer(model_buffer, model_buffer_size);
 
+  static TfLiteRegistration reg = {nullptr, nullptr, nullptr, nullptr};
+  reinterpret_cast<tflite::ops::builtin::BuiltinOpResolver*>(resolver.get())->AddCustom("Convolution2DTransposeBias", &reg);
+
   // Initialize the interpreter from the model.
   const auto interpreter_builder_result =
       tflite::InterpreterBuilder(model_->GetModel(), *resolver, nullptr)(
