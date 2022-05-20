@@ -115,6 +115,8 @@ http_archive(
     patches = [
         # We need to rename lite/ios/BUILD.apple to lite/ios/BUILD.
         "@//third_party:tensorflow_lite_ios_build.patch",
+        # WebNN delegate
+        "@//third_party:tensorflow_lite_webnn_delegate.patch",
     ],
     patch_args = ["-p1"],
 )
@@ -558,6 +560,31 @@ http_archive(
     sha256 = "7a58a9996b113d3e0675df30b5f17e28aa47de2e684a844f05394fe2f6f12e8e",
     strip_prefix = "emsdk-c1589b55641787d55d53e883852035beea9aec3f/bazel",
     url = "https://github.com/emscripten-core/emsdk/archive/c1589b55641787d55d53e883852035beea9aec3f.tar.gz",
+    patches = [
+        # WebNN support
+        "@//third_party:emsdk.patch",
+    ],
+    patch_args = ["-p2"],
+)
+
+emscripten_url = "https://storage.googleapis.com/webassembly/emscripten-releases-builds/{}/{}/wasm-binaries.tbz2"
+
+# "2.0.15"
+http_archive(
+    name = "emscripten_bin_linux",
+    strip_prefix = "install",
+    url = emscripten_url.format("linux", "89202930a98fe7f9ed59b574469a9471b0bda7dd"),
+    sha256 = "7ff49fc63adf29970f6e7af1df445d7f554bdbbb2606db1cb5d3567ce69df1db",
+    build_file = "@emsdk//emscripten_toolchain:emscripten.BUILD",
+    type = "tar.bz2",
+    patches = [
+        # WebNN support
+        "@//third_party:emscripten_webnn_support.patch",
+    ],
+    patch_args = ["-d", "emscripten", "-p1"],
+    # Clear the cache to renegerate the webnn headers and libs
+    # The first "yarn build" would fail. Rerunning it would be successful.
+    patch_cmds = ["rm -r emscripten/cache"],
 )
 
 load("@emsdk//:deps.bzl", emsdk_deps = "deps")
